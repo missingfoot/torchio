@@ -5,6 +5,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { Modal, ModalHeader, ModalTitle } from "./ui/modal";
 import { Button, ButtonGroup } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { TrimBar } from "./TrimBar";
 import { formatDuration } from "@/lib/utils";
 import type { TrimRange, Trim } from "@/types";
@@ -55,6 +56,7 @@ export function TrimModal({
   const [pendingTrimEnd, setPendingTrimEnd] = useState<number | null>(null); // Set during drag
   const [loopZone, setLoopZone] = useState<{ start: number; end: number } | null>(null);
   const [playheadLocked, setPlayheadLocked] = useState(false);
+  const [showRemaining, setShowRemaining] = useState(false);
 
   const isValid = trims.length > 0;
   const videoSrc = convertFileSrc(filePath);
@@ -425,68 +427,81 @@ export function TrimModal({
             </button>
           </div>
 
-          {/* Trims Sidebar */}
-          <div className="w-52 border-l bg-card flex flex-col">
-            {/* Sidebar header */}
-            <div className="p-3 border-b flex items-center justify-between">
-              <span className="text-sm font-medium">Trims</span>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    onClick={addTrim}
-                    disabled={loading}
-                  >
-                    <Plus className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="left">
-                  <p>Add trim at playhead</p>
-                </TooltipContent>
-              </Tooltip>
-            </div>
-
-            {/* Trims list */}
-            <div className="flex-1 overflow-y-auto p-2 space-y-1">
-              {trims.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground text-sm px-4">
-                  <p>No trims yet</p>
-                  <p className="text-xs mt-1">Click + to add a trim</p>
-                </div>
-              ) : (
-                trims.map((trim, index) => {
-                  const color = TRIM_COLORS[trim.colorIndex];
-                  const trimDuration = trim.endTime - trim.startTime;
-                  return (
-                    <div
-                      key={trim.id}
-                      className="p-2 rounded bg-muted/50 hover:bg-muted transition-colors"
+          {/* Sidebar with Tabs */}
+          <div className="w-[260px] border-l bg-card flex flex-col">
+            <Tabs defaultValue="trims" className="flex flex-col h-full">
+              {/* Tabs header */}
+              <div className="p-2 border-b flex items-center justify-between">
+                <TabsList className="h-8">
+                  <TabsTrigger value="trims" className="text-xs px-3">Trims</TabsTrigger>
+                  <TabsTrigger value="markers" className="text-xs px-3">Markers</TabsTrigger>
+                </TabsList>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={addTrim}
+                      disabled={loading}
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className={`w-2 h-2 rounded-full ${color.dot}`} />
-                          <span className="text-sm font-medium">{index + 1}</span>
-                          <span className={`text-xs ${color.text}`}>
-                            {formatDuration(trim.startTime)} - {formatDuration(trim.endTime)}
-                          </span>
+                      <Plus className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="left">
+                    <p>Add trim at playhead</p>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+
+              {/* Trims tab content */}
+              <TabsContent value="trims" className="flex-1 overflow-y-auto p-2 space-y-1 mt-0">
+                {trims.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground text-sm px-4">
+                    <p>No trims yet</p>
+                    <p className="text-xs mt-1">Click + to add a trim</p>
+                  </div>
+                ) : (
+                  trims.map((trim, index) => {
+                    const color = TRIM_COLORS[trim.colorIndex];
+                    const trimDuration = trim.endTime - trim.startTime;
+                    return (
+                      <div
+                        key={trim.id}
+                        className="p-2 rounded bg-muted/50 hover:bg-muted transition-colors"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className={`w-2 h-2 rounded-full ${color.dot}`} />
+                            <span className="text-sm font-medium">{index + 1}</span>
+                            <span className={`text-xs ${color.text}`}>
+                              {formatDuration(trim.startTime)} - {formatDuration(trim.endTime)}
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => deleteTrim(trim.id)}
+                            className="text-muted-foreground hover:text-destructive transition-colors"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
                         </div>
-                        <button
-                          onClick={() => deleteTrim(trim.id)}
-                          className="text-muted-foreground hover:text-destructive transition-colors"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
+                        <div className="flex items-center justify-between mt-1 text-xs text-muted-foreground pl-4">
+                          <span>{formatDuration(trimDuration)}</span>
+                        </div>
                       </div>
-                      <div className="flex items-center justify-between mt-1 text-xs text-muted-foreground pl-4">
-                        <span>{formatDuration(trimDuration)}</span>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
+                    );
+                  })
+                )}
+              </TabsContent>
+
+              {/* Markers tab content */}
+              <TabsContent value="markers" className="flex-1 overflow-y-auto p-2 mt-0">
+                <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground text-sm px-4">
+                  <p>No markers yet</p>
+                  <p className="text-xs mt-1">Use marker mode to add markers</p>
+                </div>
+              </TabsContent>
+            </Tabs>
           </div>
         </div>
 
@@ -504,7 +519,7 @@ export function TrimModal({
                       variant="subtle"
                       size="sm"
                       onClick={() => setBarMode('select')}
-                      className={barMode === 'select' ? 'bg-muted text-foreground' : ''}
+                      className={barMode === 'select' ? 'bg-blue-500/20 text-blue-400' : ''}
                     >
                       <MousePointer className="h-4 w-4 mr-1" />
                       Select
@@ -520,7 +535,7 @@ export function TrimModal({
                       variant="subtle"
                       size="sm"
                       onClick={() => setBarMode('trim')}
-                      className={barMode === 'trim' ? 'bg-muted text-foreground' : ''}
+                      className={barMode === 'trim' ? 'bg-yellow-500/20 text-yellow-400' : ''}
                     >
                       <Scissors className="h-4 w-4 mr-1" />
                       Trim
@@ -536,7 +551,7 @@ export function TrimModal({
                       variant="subtle"
                       size="sm"
                       onClick={() => setBarMode('marker')}
-                      className={barMode === 'marker' ? 'bg-muted text-foreground' : ''}
+                      className={barMode === 'marker' ? 'bg-red-500/20 text-red-400' : ''}
                     >
                       <SquareSplitHorizontal className="h-4 w-4 mr-1" />
                       Marker
@@ -568,13 +583,17 @@ export function TrimModal({
               )}
             </div>
 
-            {/* Playhead / Total duration */}
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-white" />
-              <span className="text-foreground">{formatDuration(currentTime)}</span>
+            {/* Playhead / Total duration - click to toggle elapsed/remaining */}
+            <button
+              onClick={() => setShowRemaining(!showRemaining)}
+              className="flex items-center gap-2 hover:bg-muted/50 px-2 py-1 -my-1 rounded transition-colors"
+            >
+              <span className="text-foreground tabular-nums">
+                {showRemaining ? `-${formatDuration(duration - currentTime)}` : formatDuration(currentTime)}
+              </span>
               <span className="text-muted-foreground">/</span>
-              <span className="text-muted-foreground">{formatDuration(duration)}</span>
-            </div>
+              <span className="text-muted-foreground tabular-nums">{formatDuration(duration)}</span>
+            </button>
           </div>
 
           {/* Trim bar */}
