@@ -1,0 +1,12 @@
+# Place FFmpeg binaries here for bundling:
+#
+# Windows: ffmpeg.exe, ffprobe.exe
+# macOS: ffmpeg, ffprobe
+# Linux: ffmpeg, ffprobe
+#
+# Download from:
+# - Windows: https://github.com/BtbN/FFmpeg-Builds/releases (ffmpeg-master-latest-win64-gpl.zip)
+# - macOS: https://evermeet.cx/ffmpeg/ or brew install ffmpeg
+# - Linux: https://johnvansickle.com/ffmpeg/ (static builds)
+#
+# Make sure to get STATIC builds that include libwebp support.

@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+src-tauri/target/
+
+# FFmpeg binaries (large, download separately)
+src-tauri/ffmpeg/ffmpeg*
+src-tauri/ffmpeg/ffprobe*
+!src-tauri/ffmpeg/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Tauri
+src-tauri/gen/
+
+# Windows reserved names
+nul
+
+# Claude local settings
+.claude/
