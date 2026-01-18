@@ -51,4 +51,5 @@ export interface Trim {
   startTime: number;
   endTime: number;
   colorIndex: number;
+  name?: string;
 }

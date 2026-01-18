@@ -337,18 +337,35 @@ async fn convert_to_webp(
         let app_clone = app.clone();
         let id_clone = id.to_string();
 
-        // Build args with optional trim parameters
-        let trim_start_str = trim_start.map(|s| format!("{:.3}", s));
+        // Build args with optional trim parameters using hybrid seeking for frame-accuracy
+        // Hybrid seeking: fast seek (whole seconds) BEFORE -i, accurate seek (fraction) AFTER -i
         let trim_duration_str = trim_duration.map(|d| format!("{:.3}", d));
+
+        // Split trim_start into fast seek (whole seconds) and accurate seek (fractional part)
+        let (fast_seek_str, accurate_seek_str) = if let Some(start) = trim_start {
+            let fast = start.floor();
+            let accurate = start - fast;
+            (
+                Some(format!("{:.0}", fast)),
+                if accurate > 0.001 { Some(format!("{:.3}", accurate)) } else { None }
+            )
+        } else {
+            (None, None)
+        };
 
         let mut args: Vec<&str> = vec!["-y"];
 
-        // Add seek position BEFORE input for fast seeking
-        if let Some(ref start) = trim_start_str {
-            args.extend(["-ss", start.as_str()]);
+        // Fast seek BEFORE input (seeks to nearest keyframe - fast but approximate)
+        if let Some(ref fast) = fast_seek_str {
+            args.extend(["-ss", fast.as_str()]);
         }
 
         args.extend(["-i", input_path]);
+
+        // Accurate seek AFTER input (decodes frames for exact positioning)
+        if let Some(ref accurate) = accurate_seek_str {
+            args.extend(["-ss", accurate.as_str()]);
+        }
 
         // Add duration AFTER input
         if let Some(ref duration) = trim_duration_str {

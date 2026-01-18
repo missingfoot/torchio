@@ -76,6 +76,7 @@ interface TrimBarProps {
   duration: number;
   trims: Trim[];
   trimsVisible: boolean;
+  markersVisible: boolean;
   onTrimUpdate: (id: number, startTime: number, endTime: number) => void;
   onHover?: (time: number | null) => void;
   lockedTimes?: number[];
@@ -103,6 +104,7 @@ export function TrimBar({
   duration,
   trims,
   trimsVisible,
+  markersVisible,
   onTrimUpdate,
   onHover,
   lockedTimes = [],
@@ -590,7 +592,7 @@ export function TrimBar({
       })}
 
       {/* Locked position indicators */}
-      {lockedTimes.map((lt, i) => (
+      {markersVisible && lockedTimes.map((lt, i) => (
         <div
           key={i}
           className="absolute top-0 bottom-0 w-px bg-red-500 z-20 pointer-events-none"
