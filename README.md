@@ -1,4 +1,4 @@
-# Mini Converter
+# Torchio
 
 **Cut, clip, and convert videos without the hassle.**
 
@@ -8,7 +8,7 @@
 
 ## What It Does
 
-Mini Converter makes it dead simple to chop up videos and export them however you need. Select multiple sections from a single video, export them all at once as MP4, GIF, WebP, MKV — whatever format fits. No complicated timeline editors, no confusing export settings. Just drag, cut, export.
+Torchio makes it dead simple to chop up videos and export them however you need. Select multiple sections from a single video, export them all at once as MP4, GIF, WebP, MKV — whatever format fits. No complicated timeline editors, no confusing export settings. Just drag, cut, export.
 
 Everything runs locally on your computer. Your videos never leave your machine — no uploading to servers, no waiting for cloud processing, no accounts or subscriptions. Open the app and start working.
 
@@ -72,7 +72,7 @@ Set a target file size and the app figures out the rest. It remembers your prefe
 
 No cloud. No servers. No account. No subscription.
 
-Mini Converter runs entirely on your computer. When you drop in a video, it stays on your machine. When you export, it saves to your drive. Nothing gets uploaded anywhere.
+Torchio runs entirely on your computer. When you drop in a video, it stays on your machine. When you export, it saves to your drive. Nothing gets uploaded anywhere.
 
 - **No account required** — Download, open, start using
 - **No internet needed** — Works completely offline

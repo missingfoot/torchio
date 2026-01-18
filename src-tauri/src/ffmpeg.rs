@@ -20,7 +20,7 @@ const FFPROBE_NAME: &str = "ffprobe";
 fn find_binary(app: &tauri::AppHandle, name: &str) -> PathBuf {
     // 1. Check development path (src-tauri/ffmpeg/)
     if let Ok(exe_path) = std::env::current_exe() {
-        // During dev: target/debug/mini-converter.exe
+        // During dev: target/debug/torchio.exe
         // We want: src-tauri/ffmpeg/
         if let Some(target_dir) = exe_path.parent() {
             // Go up from target/debug to project root, then into src-tauri/ffmpeg

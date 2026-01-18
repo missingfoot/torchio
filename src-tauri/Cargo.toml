@@ -1,12 +1,12 @@
 [package]
-name = "mini-converter"
+name = "torchio"
 version = "0.1.0"
-description = "A lightweight file converter for videos and GIFs"
+description = "A lightweight video converter and editor"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "mini_converter_lib"
+name = "torchio_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

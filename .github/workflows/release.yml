@@ -1,0 +1,248 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Prevent concurrent releases
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Download FFmpeg (Windows)
+        shell: pwsh
+        run: |
+          $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $zipPath = "$env:TEMP\ffmpeg.zip"
+          $extractPath = "$env:TEMP\ffmpeg-extract"
+
+          Write-Host "Downloading FFmpeg..."
+          Invoke-WebRequest -Uri $ffmpegUrl -OutFile $zipPath
+
+          Write-Host "Extracting FFmpeg..."
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+          # Find the extracted folder (name includes version)
+          $ffmpegFolder = Get-ChildItem -Path $extractPath -Directory | Select-Object -First 1
+
+          Write-Host "Copying FFmpeg binaries..."
+          Copy-Item -Path "$($ffmpegFolder.FullName)\bin\ffmpeg.exe" -Destination "src-tauri\ffmpeg\ffmpeg.exe" -Force
+          Copy-Item -Path "$($ffmpegFolder.FullName)\bin\ffprobe.exe" -Destination "src-tauri\ffmpeg\ffprobe.exe" -Force
+
+          Write-Host "FFmpeg binaries ready:"
+          Get-ChildItem -Path "src-tauri\ffmpeg"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Tauri app
+        run: npm run tauri build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          retention-days: 5
+
+  build-macos:
+    runs-on: macos-13  # Use Intel runner for x64 builds
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Download FFmpeg (macOS)
+        run: |
+          echo "Downloading FFmpeg..."
+          curl -L -o /tmp/ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/zip"
+          curl -L -o /tmp/ffprobe.zip "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
+
+          echo "Extracting FFmpeg..."
+          unzip -o /tmp/ffmpeg.zip -d /tmp/ffmpeg
+          unzip -o /tmp/ffprobe.zip -d /tmp/ffprobe
+
+          echo "Copying FFmpeg binaries..."
+          cp /tmp/ffmpeg/ffmpeg src-tauri/ffmpeg/ffmpeg
+          cp /tmp/ffprobe/ffprobe src-tauri/ffmpeg/ffprobe
+          chmod +x src-tauri/ffmpeg/ffmpeg src-tauri/ffmpeg/ffprobe
+
+          echo "FFmpeg binaries ready:"
+          ls -la src-tauri/ffmpeg/
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Tauri app
+        run: npm run tauri build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          retention-days: 5
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            ffmpeg
+
+      - name: Setup FFmpeg binaries
+        run: |
+          echo "Copying system FFmpeg binaries..."
+          cp $(which ffmpeg) src-tauri/ffmpeg/ffmpeg
+          cp $(which ffprobe) src-tauri/ffmpeg/ffprobe
+          chmod +x src-tauri/ffmpeg/ffmpeg src-tauri/ffmpeg/ffprobe
+
+          echo "FFmpeg binaries ready:"
+          ls -la src-tauri/ffmpeg/
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Tauri app
+        run: npm run tauri build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          retention-days: 5
+
+  release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tauri.conf.json
+        id: version
+        run: |
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          find artifacts -type f
+
+          # Create output directory
+          mkdir -p release-assets
+
+          # Rename artifacts to version-less names for stable download URLs
+          cp artifacts/windows-installer/*.exe release-assets/Torchio-windows-x64.exe || true
+          cp artifacts/macos-dmg/*.dmg release-assets/Torchio-macos-x64.dmg || true
+          cp artifacts/linux-deb/*.deb release-assets/Torchio-linux-amd64.deb || true
+
+          echo "Release assets:"
+          ls -la release-assets/
+
+      - name: Delete existing latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Delete the release if it exists (ignore errors if it doesn't)
+          gh release delete latest --yes || true
+          # Delete the tag if it exists
+          git push origin :refs/tags/latest || true
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Create release with latest tag
+          gh release create latest \
+            --title "Torchio v$VERSION" \
+            --notes "## Downloads
+
+          | Platform | Download |
+          |----------|----------|
+          | Windows | [Torchio-windows-x64.exe](https://github.com/${{ github.repository }}/releases/latest/download/Torchio-windows-x64.exe) |
+          | macOS | [Torchio-macos-x64.dmg](https://github.com/${{ github.repository }}/releases/latest/download/Torchio-macos-x64.dmg) |
+          | Linux | [Torchio-linux-amd64.deb](https://github.com/${{ github.repository }}/releases/latest/download/Torchio-linux-amd64.deb) |
+
+          ### Installation Notes
+
+          **Windows**: You may see a SmartScreen warning. Click \"More info\" → \"Run anyway\" to install.
+
+          **macOS**: You may see a Gatekeeper warning. Right-click the app → \"Open\" → \"Open\" to bypass.
+
+          **Linux**: Install with \`sudo dpkg -i Torchio-linux-amd64.deb\`
+
+          ---
+          v$VERSION • Built from commit ${{ github.sha }}" \
+            --latest \
+            release-assets/*

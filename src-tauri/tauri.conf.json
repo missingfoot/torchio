@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Mini Converter",
+  "productName": "Torchio",
   "version": "0.1.0",
-  "identifier": "com.miniconverter.app",
+  "identifier": "com.torchio.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Mini Converter",
+        "title": "Torchio",
         "width": 1200,
         "height": 800,
         "minWidth": 400,
