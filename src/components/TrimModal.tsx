@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { SquareSplitHorizontal, Plus, X, MousePointer, Scissors, Trash2, Eye, EyeOff } from "lucide-react";
+import { SquareSplitHorizontal, Plus, X, MousePointer, Scissors, Trash2, Eye, EyeOff, Volume2, VolumeX } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
@@ -85,6 +85,8 @@ export function TrimModal({
   const [editingTrimId, setEditingTrimId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
   const [cachedTimes, setCachedTimes] = useState<number[]>([]);
+  const [isMuted, setIsMuted] = useState(false);
+  const [volume, setVolume] = useState(0.7);
 
   const isValid = trims.length > 0;
   const videoSrc = convertFileSrc(filePath);
@@ -299,6 +301,14 @@ export function TrimModal({
     }
   };
 
+  // Sync volume to video element
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video) {
+      video.volume = volume;
+    }
+  }, [volume]);
+
   // Handle video time updates (UI only - looping handled by RAF loop)
   const handleTimeUpdate = useCallback(() => {
     const video = videoRef.current;
@@ -511,14 +521,11 @@ export function TrimModal({
   }, [loopZone, currentTime, handleLockToggle]);
 
   const handleHover = (time: number | null) => {
-    // Handle hover end - hide cache overlay and precise seek
+    // Handle hover end - keep showing last frame, don't jerk
     if (time === null) {
-      setCachedFrame(null);
       pendingCaptureRef.current = null;
-      const video = videoRef.current;
-      if (video && !isPlaying) {
-        video.currentTime = prevTimeRef.current;
-      }
+      // Don't hide cached frame or seek - keeps display stable
+      // Video position syncs on play via togglePlay
       return;
     }
 
@@ -722,7 +729,8 @@ export function TrimModal({
               crossOrigin="anonymous"
               className="max-w-full max-h-full object-contain"
               playsInline
-              muted
+              muted={!isPlaying || isMuted}
+              volume={volume}
               preload="metadata"
               onLoadedMetadata={handleLoadedMetadata}
               onTimeUpdate={handleTimeUpdate}
@@ -1202,6 +1210,67 @@ export function TrimModal({
                   <p>{loopZone ? "Add trim from selection" : "Add trim at playhead"}</p>
                 </TooltipContent>
               </Tooltip>
+
+              {/* Divider */}
+              <div className="h-5 w-px bg-border ml-2" />
+
+              {/* Volume controls */}
+              <div className="flex items-center gap-3 ml-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="subtle"
+                      size="icon"
+                      onClick={() => setIsMuted(!isMuted)}
+                    >
+                      {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    <p>{isMuted ? "Unmute" : "Mute"}</p>
+                  </TooltipContent>
+                </Tooltip>
+                <div
+                  className="relative w-20 h-8 flex items-center group"
+                  onWheel={(e) => {
+                    e.preventDefault();
+                    const delta = e.deltaY > 0 ? -0.05 : 0.05;
+                    const newVolume = Math.max(0, Math.min(1, volume + delta));
+                    setVolume(newVolume);
+                    if (newVolume > 0 && isMuted) setIsMuted(false);
+                    if (newVolume === 0) setIsMuted(true);
+                  }}
+                >
+                  {/* Background track */}
+                  <div className="absolute left-0 w-full h-1 bg-white/20 rounded-full" />
+                  {/* Filled portion */}
+                  <div
+                    className="absolute left-0 h-1 bg-white rounded-full z-[1]"
+                    style={{ width: `${(isMuted ? 0 : volume) * 100}%` }}
+                  />
+                  {/* Input with transparent track */}
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={isMuted ? 0 : volume}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      setVolume(val);
+                      if (val > 0 && isMuted) setIsMuted(false);
+                      if (val === 0) setIsMuted(true);
+                    }}
+                    className="absolute w-full h-1 appearance-none bg-transparent cursor-pointer z-10
+                      [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-transparent
+                      [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:mt-[-4px] [&::-webkit-slider-thumb]:transition-shadow [&::-webkit-slider-thumb]:duration-150 [&::-webkit-slider-thumb]:shadow-[0_0_0_0px_rgba(255,255,255,0.2)]
+                      [&::-webkit-slider-thumb]:hover:shadow-[0_0_0_4px_rgba(255,255,255,0.2)]
+                      [&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-transparent
+                      [&::-moz-range-thumb]:appearance-none [&::-moz-range-thumb]:w-3 [&::-moz-range-thumb]:h-3 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-white [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:transition-shadow [&::-moz-range-thumb]:duration-150 [&::-moz-range-thumb]:shadow-[0_0_0_0px_rgba(255,255,255,0.2)]
+                      [&::-moz-range-thumb]:hover:shadow-[0_0_0_4px_rgba(255,255,255,0.2)]"
+                  />
+                </div>
+              </div>
 
             </div>
 
