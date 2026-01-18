@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 interface DropZoneProps {
   onFilesDropped: (paths: string[]) => void;
   disabled?: boolean;
+  fullScreen?: boolean;
 }
 
 interface DragDropPayload {
@@ -13,7 +14,7 @@ interface DragDropPayload {
   position: { x: number; y: number };
 }
 
-export function DropZone({ onFilesDropped, disabled }: DropZoneProps) {
+export function DropZone({ onFilesDropped, disabled, fullScreen }: DropZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
 
   useEffect(() => {
@@ -51,7 +52,8 @@ export function DropZone({ onFilesDropped, disabled }: DropZoneProps) {
   return (
     <div
       className={cn(
-        "relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 transition-all duration-200",
+        "relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed transition-all duration-200",
+        fullScreen ? "w-full max-w-md p-12" : "p-8",
         isDragging
           ? "border-primary bg-primary/10"
           : "border-muted-foreground/25 hover:border-muted-foreground/50",
@@ -60,11 +62,15 @@ export function DropZone({ onFilesDropped, disabled }: DropZoneProps) {
     >
       <Upload
         className={cn(
-          "h-12 w-12 mb-4 transition-colors",
+          "mb-4 transition-colors",
+          fullScreen ? "h-16 w-16" : "h-12 w-12",
           isDragging ? "text-primary" : "text-muted-foreground"
         )}
       />
-      <p className="text-lg font-medium text-center">
+      <p className={cn(
+        "font-medium text-center",
+        fullScreen ? "text-xl" : "text-lg"
+      )}>
         {isDragging ? "Drop files here" : "Drag & drop files here"}
       </p>
       <p className="text-sm text-muted-foreground mt-2">

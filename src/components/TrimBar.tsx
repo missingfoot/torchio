@@ -1,5 +1,5 @@
 import { useRef, useCallback } from "react";
-import type { Trim } from "@/types";
+import type { Trim, Marker } from "@/types";
 
 // Utility: Snap a time value to the nearest locked time if within threshold
 function snapToLockedTime(
@@ -79,7 +79,8 @@ interface TrimBarProps {
   markersVisible: boolean;
   onTrimUpdate: (id: number, startTime: number, endTime: number) => void;
   onHover?: (time: number | null) => void;
-  lockedTimes?: number[];
+  markers?: Marker[];
+  selectedMarkerId?: number | null;
   filmstrip?: string[];
   currentTime?: number;
   colors: TrimColor[];
@@ -109,7 +110,8 @@ export function TrimBar({
   markersVisible,
   onTrimUpdate,
   onHover,
-  lockedTimes = [],
+  markers = [],
+  selectedMarkerId,
   filmstrip = [],
   currentTime,
   colors,
@@ -127,6 +129,8 @@ export function TrimBar({
   onPlayheadLockChange,
   cachedTimes = [],
 }: TrimBarProps) {
+  // Extract times for snapping purposes
+  const lockedTimes = markers.map(m => m.time);
   const barRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
   const isClickingRef = useRef(false); // Prevent hover from overwriting click
@@ -368,6 +372,7 @@ export function TrimBar({
             seekHasMoved = true;
             const currentT = getTimeFromPosition(ev.clientX);
             onSeek(currentT);
+            onHover?.(currentT); // Update frame preview
 
             // Update loop zone live as user drags
             const start = Math.min(seekStartTime, currentT);
@@ -418,6 +423,7 @@ export function TrimBar({
               trimHasMoved = true;
               const currentT = getTimeFromPosition(ev.clientX);
               onSeek(currentT);
+              onHover?.(currentT); // Update frame preview
               // Update pending trim end to show live solid preview
               onPendingTrimEndChange(currentT);
             };
@@ -559,12 +565,12 @@ export function TrimBar({
       {/* Cache indicator - shows which frames are cached */}
       {cachedTimes.length > 0 && (
         <div className="absolute bottom-0 left-0 right-0 h-1 pointer-events-none">
-          {cachedTimes.map((time) => {
+          {cachedTimes.map((time, i) => {
             const percent = (time / duration) * 100;
             const widthPercent = (0.1 / duration) * 100; // Each cache entry covers 0.1s
             return (
               <div
-                key={time}
+                key={`${time}-${i}`}
                 className="absolute top-0 bottom-0 bg-green-500/70"
                 style={{
                   left: `${percent}%`,
@@ -614,14 +620,25 @@ export function TrimBar({
         );
       })}
 
-      {/* Locked position indicators */}
-      {markersVisible && lockedTimes.map((lt, i) => (
-        <div
-          key={i}
-          className="absolute top-0 bottom-0 w-px bg-red-500 z-20 pointer-events-none"
-          style={{ left: `${(lt / duration) * 100}%` }}
-        />
-      ))}
+      {/* Marker indicators with dots above */}
+      {markersVisible && markers.map((marker) => {
+        const isSelected = selectedMarkerId === marker.id;
+        const leftPercent = (marker.time / duration) * 100;
+        return (
+          <div key={marker.id} className="pointer-events-none z-20">
+            {/* Red dot above the timeline */}
+            <div
+              className={`absolute -top-2 w-3 h-3 rounded-full border-2 border-background transition-transform ${isSelected ? 'bg-red-500 scale-125' : 'bg-red-400'}`}
+              style={{ left: `calc(${leftPercent}% - 6px)` }}
+            />
+            {/* Vertical line */}
+            <div
+              className={`absolute top-0 bottom-0 w-px ${isSelected ? 'bg-red-500' : 'bg-red-400'}`}
+              style={{ left: `${leftPercent}%` }}
+            />
+          </div>
+        );
+      })}
 
       {/* Loop zone indicator (styled like a trim but blue) */}
       {loopZone && (() => {

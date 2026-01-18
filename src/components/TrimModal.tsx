@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { SquareSplitHorizontal, Plus, X, MousePointer, Scissors, Trash2, Eye, EyeOff, Volume2, VolumeX, Wand2, Loader2 } from "lucide-react";
+import { SquareSplitHorizontal, Plus, MousePointer, Scissors, Trash2, Eye, EyeOff, Volume2, VolumeX, Wand2, Loader2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
@@ -8,15 +8,17 @@ import { Button, ButtonGroup } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { TrimBar } from "./TrimBar";
 import { formatDuration } from "@/lib/utils";
-import type { TrimRange, Trim } from "@/types";
+import { useExport } from "@/contexts/ExportContext";
+import type { Trim, Marker } from "@/types";
 
 interface TrimModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   filePath: string;
   fileName: string;
-  onConfirm: (ranges: TrimRange[]) => void;
+  fileSize: number;
   onCancel: () => void;
+  onExportStarted?: () => void;
 }
 
 const QUICK_DURATIONS = [2, 5, 8, 10, 15, 20, 25, 30];
@@ -50,10 +52,12 @@ export function TrimModal({
   open,
   onOpenChange,
   filePath,
-  fileName: _fileName,
-  onConfirm,
+  fileName,
+  fileSize,
   onCancel,
+  onExportStarted,
 }: TrimModalProps) {
+  const { openPanel, isExporting } = useExport();
   const videoRef = useRef<HTMLVideoElement>(null);
   const prevTimeRef = useRef(0);
   const animationFrameRef = useRef<number | null>(null);
@@ -74,7 +78,8 @@ export function TrimModal({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [presetsOpen, setPresetsOpen] = useState(false);
-  const [lockedTimes, setLockedTimes] = useState<number[]>([]);
+  const [markers, setMarkers] = useState<Marker[]>([]);
+  const [nextMarkerId, setNextMarkerId] = useState(1);
   const [barMode, setBarMode] = useState<BarMode>('select');
   const [pendingTrimStart, setPendingTrimStart] = useState<number | null>(null);
   const [pendingTrimEnd, setPendingTrimEnd] = useState<number | null>(null); // Set during drag
@@ -85,13 +90,16 @@ export function TrimModal({
   const [markersVisible, setMarkersVisible] = useState(true);
   const [editingTrimId, setEditingTrimId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [editingMarkerId, setEditingMarkerId] = useState<number | null>(null);
+  const [editingMarkerName, setEditingMarkerName] = useState('');
+  const [selectedMarkerId, setSelectedMarkerId] = useState<number | null>(null);
   const [cachedTimes, setCachedTimes] = useState<number[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(0.7);
   const [isDetectingScenes, setIsDetectingScenes] = useState(false);
   const [autoDetectOpen, setAutoDetectOpen] = useState(false);
 
-  const isValid = trims.length > 0;
+  const isValid = true; // Always allow continue - if no trims, export full video
   const videoSrc = convertFileSrc(filePath);
 
   // Frame cache helpers - quantize time to 0.1s intervals for cache keys
@@ -212,7 +220,9 @@ export function TrimModal({
     setFilmstrip([]);
     setTrims([]);
     setNextTrimId(1);
-    setLockedTimes([]);
+    setMarkers([]);
+    setNextMarkerId(1);
+    setSelectedMarkerId(null);
     setTrimsVisible(true);
     setIsPlaying(false);
     setCurrentTime(0);
@@ -250,12 +260,34 @@ export function TrimModal({
         const store = await getTrimStore();
         const key = getStorageKey(filePath);
         const savedTrims = await store.get<Trim[]>(`${key}_trims`);
-        const savedMarkers = await store.get<number[]>(`${key}_markers`);
-        const savedNextId = await store.get<number>(`${key}_nextId`);
+        const savedNextTrimId = await store.get<number>(`${key}_nextId`);
+
+        // Load markers with migration from old number[] format
+        const savedMarkersRaw = await store.get<Marker[] | number[]>(`${key}_markers`);
+        const savedNextMarkerId = await store.get<number>(`${key}_nextMarkerId`);
+
+        // Migrate old number[] markers to Marker[] format
+        let loadedMarkers: Marker[] = [];
+        if (savedMarkersRaw && Array.isArray(savedMarkersRaw)) {
+          if (savedMarkersRaw.length > 0) {
+            if (typeof savedMarkersRaw[0] === 'number') {
+              // Old format: number[] - migrate to Marker[]
+              loadedMarkers = (savedMarkersRaw as number[]).map((time, index) => ({
+                id: index + 1,
+                time,
+                name: `Chapter ${index + 1}`,
+              }));
+            } else {
+              // New format: Marker[]
+              loadedMarkers = savedMarkersRaw as Marker[];
+            }
+          }
+        }
 
         setTrims(savedTrims ?? []);
-        setNextTrimId(savedNextId ?? (savedTrims?.length ?? 0) + 1);
-        setLockedTimes(savedMarkers ?? []);
+        setNextTrimId(savedNextTrimId ?? (savedTrims?.length ?? 0) + 1);
+        setMarkers(loadedMarkers);
+        setNextMarkerId(savedNextMarkerId ?? (loadedMarkers.length > 0 ? Math.max(...loadedMarkers.map(m => m.id)) + 1 : 1));
 
         // Mark this file as loaded - enables saving
         loadedFileRef.current = filePath;
@@ -263,7 +295,8 @@ export function TrimModal({
         console.error("Failed to load data:", e);
         setTrims([]);
         setNextTrimId(1);
-        setLockedTimes([]);
+        setMarkers([]);
+        setNextMarkerId(1);
         loadedFileRef.current = filePath; // Still enable saving even on error
       } finally {
         setLoading(false);
@@ -302,7 +335,8 @@ export function TrimModal({
       try {
         const store = await getTrimStore();
         const key = getStorageKey(filePath);
-        await store.set(`${key}_markers`, lockedTimes);
+        await store.set(`${key}_markers`, markers);
+        await store.set(`${key}_nextMarkerId`, nextMarkerId);
         await store.save();
       } catch (e) {
         console.error("Failed to save markers:", e);
@@ -310,7 +344,7 @@ export function TrimModal({
     };
 
     saveMarkers();
-  }, [lockedTimes, open, loading, filePath]);
+  }, [markers, nextMarkerId, open, loading, filePath]);
 
   // Handle video metadata loaded
   const handleLoadedMetadata = () => {
@@ -422,7 +456,9 @@ export function TrimModal({
       // (cached frames may show a different time than video's actual position)
       video.currentTime = currentTime;
       prevTimeRef.current = currentTime;
-      video.play();
+      video.play().catch(() => {
+        // Ignore AbortError - happens when pause() is called before play() resolves
+      });
       setIsPlaying(true);
       setCachedFrame(null);
     }
@@ -554,32 +590,56 @@ export function TrimModal({
     }
   }, [editingTrimId, editingName, updateTrimName]);
 
-  const handleLockToggle = useCallback((time: number) => {
-    // Add a new lock (avoid duplicates within threshold)
+  // Marker CRUD handlers
+  const addMarker = useCallback((time: number) => {
+    // Avoid duplicates within threshold
     const snapThreshold = duration * 0.01;
-    setLockedTimes(prev => {
-      const isDuplicate = prev.some(lt => Math.abs(lt - time) < snapThreshold);
-      if (isDuplicate) return prev;
-      return [...prev, time];
-    });
-  }, [duration]);
+    const isDuplicate = markers.some(m => Math.abs(m.time - time) < snapThreshold);
+    if (isDuplicate) return;
 
-  const removeLock = (time: number) => {
-    setLockedTimes(prev => prev.filter(t => t !== time));
-  };
+    const newMarker: Marker = {
+      id: nextMarkerId,
+      time,
+      name: `Chapter ${nextMarkerId}`,
+    };
+    setMarkers(prev => [...prev, newMarker].sort((a, b) => a.time - b.time));
+    setNextMarkerId(prev => prev + 1);
+  }, [duration, markers, nextMarkerId]);
+
+  const deleteMarker = useCallback((id: number) => {
+    setMarkers(prev => prev.filter(m => m.id !== id));
+    if (selectedMarkerId === id) setSelectedMarkerId(null);
+  }, [selectedMarkerId]);
+
+  const updateMarkerName = useCallback((id: number, name: string) => {
+    setMarkers(prev => prev.map(m => m.id === id ? { ...m, name: name.trim() || undefined } : m));
+  }, []);
+
+  const startEditingMarkerName = useCallback((marker: Marker, index: number) => {
+    setEditingMarkerId(marker.id);
+    setEditingMarkerName(marker.name || `Chapter ${index + 1}`);
+  }, []);
+
+  const saveEditingMarkerName = useCallback(() => {
+    if (editingMarkerId !== null) {
+      updateMarkerName(editingMarkerId, editingMarkerName);
+      setEditingMarkerId(null);
+      setEditingMarkerName('');
+    }
+  }, [editingMarkerId, editingMarkerName, updateMarkerName]);
 
   // Add marker at playhead (or both ends of loop zone if active)
   const addMarkerAtPlayhead = useCallback(() => {
     if (loopZone) {
       // Add markers at both ends of loop zone
-      handleLockToggle(loopZone.start);
-      handleLockToggle(loopZone.end);
+      addMarker(loopZone.start);
+      addMarker(loopZone.end);
       setLoopZone(null);
     } else {
       // Default: add at current time
-      handleLockToggle(currentTime);
+      addMarker(currentTime);
     }
-  }, [loopZone, currentTime, handleLockToggle]);
+  }, [loopZone, currentTime, addMarker]);
 
   const handleHover = (time: number | null) => {
     // Handle hover end - keep showing last frame, don't jerk
@@ -750,16 +810,31 @@ export function TrimModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open, togglePlay, stepFrame, goToStart, pendingTrimStart, pendingTrimEnd, loopZone]);
 
-  const handleConfirm = () => {
+  // Open universal export panel
+  const handleContinue = () => {
     if (videoRef.current) {
       videoRef.current.pause();
     }
-    // Convert trims to TrimRange array
-    const ranges: TrimRange[] = trims.map(t => ({
-      startTime: t.startTime,
-      endTime: t.endTime,
-    }));
-    onConfirm(ranges);
+
+    // Build ranges from trims (or full video if no trims)
+    const ranges = trims.length > 0
+      ? trims.map(t => ({ startTime: t.startTime, endTime: t.endTime }))
+      : [{ startTime: 0, endTime: duration }];
+
+    const totalDuration = ranges.reduce((sum, r) => sum + (r.endTime - r.startTime), 0);
+
+    // Open the universal export panel via context
+    openPanel({
+      id: crypto.randomUUID(),
+      sourcePath: filePath,
+      sourceName: fileName,
+      sourceSize: fileSize,
+      ranges,
+      duration: totalDuration,
+      markers: markers,  // Pass markers for MKV chapter export
+    });
+
+    onExportStarted?.();
   };
 
   const handleCancel = () => {
@@ -801,7 +876,9 @@ export function TrimModal({
                   if (videoRef.current) {
                     videoRef.current.currentTime = 0;
                     prevTimeRef.current = 0;
-                    videoRef.current.play();
+                    videoRef.current.play().catch(() => {
+                      // Ignore AbortError
+                    });
                   }
                 }}
               />
@@ -1033,10 +1110,67 @@ export function TrimModal({
                   })
                 )
               ) : (
-                <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground text-sm px-4">
-                  <p>No markers yet</p>
-                  <p className="text-xs mt-1">Use marker mode to add markers</p>
-                </div>
+                markers.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground text-sm px-4">
+                    <p>No markers yet</p>
+                    <p className="text-xs mt-1">Click + to add a marker</p>
+                  </div>
+                ) : (
+                  markers.map((marker, index) => {
+                    const isSelected = selectedMarkerId === marker.id;
+                    return (
+                      <div
+                        key={marker.id}
+                        className={`flex rounded bg-muted/50 hover:bg-muted transition-colors overflow-hidden cursor-pointer ${isSelected ? 'ring-1 ring-red-400' : ''}`}
+                        onClick={() => {
+                          handleSeek(marker.time);
+                          setSelectedMarkerId(marker.id);
+                        }}
+                      >
+                        {/* Red color bar (always red) */}
+                        <div className="w-1 bg-red-400" />
+                        {/* Content */}
+                        <div className="flex-1 p-2">
+                          {/* Row 1: Name and delete */}
+                          <div className="flex items-center justify-between">
+                            {editingMarkerId === marker.id ? (
+                              <input
+                                type="text"
+                                value={editingMarkerName}
+                                onChange={(e) => setEditingMarkerName(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') saveEditingMarkerName();
+                                  if (e.key === 'Escape') { setEditingMarkerId(null); setEditingMarkerName(''); }
+                                }}
+                                onBlur={saveEditingMarkerName}
+                                onFocus={(e) => e.target.select()}
+                                autoFocus
+                                className="text-sm font-medium text-red-400 bg-transparent outline-none w-full mr-2"
+                              />
+                            ) : (
+                              <span
+                                className="text-sm font-medium text-red-400 cursor-text"
+                                onClick={(e) => { e.stopPropagation(); startEditingMarkerName(marker, index); }}
+                              >
+                                {marker.name || `Chapter ${index + 1}`}
+                              </span>
+                            )}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); deleteMarker(marker.id); }}
+                              className="text-muted-foreground hover:text-red-400 transition-colors flex-shrink-0"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                          {/* Row 2: Timestamp */}
+                          <div className="text-xs text-muted-foreground mt-1">
+                            {formatDuration(marker.time)}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )
               )}
             </div>
 
@@ -1058,7 +1192,7 @@ export function TrimModal({
                   variant="subtle"
                   size="sm"
                   onClick={() => setMarkersVisible(!markersVisible)}
-                  disabled={lockedTimes.length === 0}
+                  disabled={markers.length === 0}
                   className="flex-1"
                 >
                   {markersVisible ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />}
@@ -1069,8 +1203,15 @@ export function TrimModal({
                 variant="subtle"
                 size="sm"
                 className="flex-1 hover:bg-red-500/20 hover:text-red-400"
-                onClick={() => sidebarTab === 'trims' ? setTrims([]) : setLockedTimes([])}
-                disabled={sidebarTab === 'trims' ? trims.length === 0 : lockedTimes.length === 0}
+                onClick={() => {
+                  if (sidebarTab === 'trims') {
+                    setTrims([]);
+                  } else {
+                    setMarkers([]);
+                    setSelectedMarkerId(null);
+                  }
+                }}
+                disabled={sidebarTab === 'trims' ? trims.length === 0 : markers.length === 0}
               >
                 <Trash2 className="h-4 w-4 mr-1" />
                 Clear all
@@ -1136,25 +1277,6 @@ export function TrimModal({
                   </TooltipContent>
                 </Tooltip>
               </ButtonGroup>
-
-              {/* Markers display */}
-              {lockedTimes.length > 0 && (
-                <div className="flex items-center gap-3">
-                  {lockedTimes.map((lt, i) => (
-                    <div key={i} className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full bg-red-500" />
-                      <span className="text-muted-foreground">{i + 1}</span>
-                      <span className="text-red-500">{formatDuration(lt)}</span>
-                      <button
-                        onClick={() => removeLock(lt)}
-                        className="text-red-500 hover:text-red-400 ml-0.5"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
 
             {/* Playhead / Total duration - click to toggle elapsed/remaining */}
@@ -1179,7 +1301,8 @@ export function TrimModal({
               markersVisible={markersVisible}
               onTrimUpdate={updateTrim}
               onHover={handleHover}
-              lockedTimes={lockedTimes}
+              markers={markers}
+              selectedMarkerId={selectedMarkerId}
               filmstrip={filmstrip}
               currentTime={currentTime}
               colors={TRIM_COLORS}
@@ -1188,7 +1311,7 @@ export function TrimModal({
               pendingTrimEnd={pendingTrimEnd}
               onSeek={handleSeek}
               onTrimCreate={createTrim}
-              onMarkerAdd={handleLockToggle}
+              onMarkerAdd={addMarker}
               onPendingTrimChange={setPendingTrimStart}
               onPendingTrimEndChange={setPendingTrimEnd}
               loopZone={loopZone}
@@ -1396,8 +1519,24 @@ export function TrimModal({
               <Button variant="outline" onClick={handleCancel}>
                 Cancel
               </Button>
-              <Button onClick={handleConfirm} disabled={!isValid || loading}>
-                Continue
+              <Button onClick={handleContinue} disabled={!isValid || loading || isExporting}>
+                {isExporting ? (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" className="mr-2">
+                      <g fill="currentColor">
+                        <g className="nc-loop-dots-4-24-icon-f">
+                          <circle cx="4" cy="12" fill="currentColor" r="3"></circle>
+                          <circle cx="12" cy="12" fill="currentColor" r="3"></circle>
+                          <circle cx="20" cy="12" fill="currentColor" r="3"></circle>
+                        </g>
+                        <style>{`.nc-loop-dots-4-24-icon-f{--animation-duration:0.8s}.nc-loop-dots-4-24-icon-f *{opacity:.4;transform:scale(.75);animation:nc-loop-dots-4-anim var(--animation-duration) infinite}.nc-loop-dots-4-24-icon-f :nth-child(1){transform-origin:4px 12px;animation-delay:-.3s;animation-delay:calc(var(--animation-duration)/-2.666)}.nc-loop-dots-4-24-icon-f :nth-child(2){transform-origin:12px 12px;animation-delay:-.15s;animation-delay:calc(var(--animation-duration)/-5.333)}.nc-loop-dots-4-24-icon-f :nth-child(3){transform-origin:20px 12px}@keyframes nc-loop-dots-4-anim{0%,100%{opacity:.4;transform:scale(.75)}50%{opacity:1;transform:scale(1)}}`}</style>
+                      </g>
+                    </svg>
+                    Exporting
+                  </>
+                ) : (
+                  "Export"
+                )}
               </Button>
             </div>
           </div>

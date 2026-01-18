@@ -1,12 +1,21 @@
 import { useState, useEffect } from "react";
 import { Store } from "@tauri-apps/plugin-store";
-import type { ConversionSettings } from "../types";
+import { FORMATS } from "../lib/formats";
+import type { ConversionSettings, FormatId } from "../types";
 
 const STORE_PATH = "settings.json";
 
+// Build default target sizes from format configs
+function getDefaultTargetSizes(): Record<FormatId, number> {
+  const sizes: Record<FormatId, number> = {};
+  for (const format of Object.values(FORMATS)) {
+    sizes[format.id] = format.sizeDefault;
+  }
+  return sizes;
+}
+
 const DEFAULT_SETTINGS: ConversionSettings = {
-  videoTargetMB: 40,
-  webpTargetMB: 3,
+  targetSizes: getDefaultTargetSizes(),
 };
 
 let store: Store | null = null;
@@ -26,13 +35,15 @@ export function useSettings() {
     async function loadSettings() {
       try {
         const s = await getStore();
-        const videoTarget = await s.get<number>("videoTargetMB");
-        const webpTarget = await s.get<number>("webpTargetMB");
+        const savedSizes = await s.get<Record<FormatId, number>>("targetSizes");
 
-        setSettings({
-          videoTargetMB: videoTarget ?? DEFAULT_SETTINGS.videoTargetMB,
-          webpTargetMB: webpTarget ?? DEFAULT_SETTINGS.webpTargetMB,
-        });
+        // Merge saved sizes with defaults (so new formats get their defaults)
+        const targetSizes = {
+          ...DEFAULT_SETTINGS.targetSizes,
+          ...savedSizes,
+        };
+
+        setSettings({ targetSizes });
       } catch (e) {
         console.error("Failed to load settings:", e);
       } finally {
@@ -42,23 +53,26 @@ export function useSettings() {
     loadSettings();
   }, []);
 
-  const updateSettings = async (newSettings: Partial<ConversionSettings>) => {
-    const updated = { ...settings, ...newSettings };
+  // Update target size for a specific format
+  const updateTargetSize = async (formatId: FormatId, size: number) => {
+    const updated = {
+      targetSizes: { ...settings.targetSizes, [formatId]: size },
+    };
     setSettings(updated);
 
     try {
       const s = await getStore();
-      if (newSettings.videoTargetMB !== undefined) {
-        await s.set("videoTargetMB", newSettings.videoTargetMB);
-      }
-      if (newSettings.webpTargetMB !== undefined) {
-        await s.set("webpTargetMB", newSettings.webpTargetMB);
-      }
+      await s.set("targetSizes", updated.targetSizes);
       await s.save();
     } catch (e) {
       console.error("Failed to save settings:", e);
     }
   };
 
-  return { settings, updateSettings, loaded };
+  // Get target size for a format (with fallback to format default)
+  const getTargetSize = (formatId: FormatId): number => {
+    return settings.targetSizes[formatId] ?? FORMATS[formatId]?.sizeDefault ?? 10;
+  };
+
+  return { settings, updateTargetSize, getTargetSize, loaded };
 }

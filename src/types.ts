@@ -1,4 +1,5 @@
-export type ConversionType = "video" | "webp";
+// Format ID - extensible string type for future formats
+export type FormatId = string;
 
 export type ConversionStatus =
   | "pending"
@@ -12,18 +13,20 @@ export interface FileItem {
   name: string;
   path: string;
   size: number;
-  type: ConversionType;
+  format: FormatId;
   status: ConversionStatus;
   progress: number;
   outputPath?: string;
   outputSize?: number;
   error?: string;
   duration?: number; // for videos, in seconds
+  trimStart?: number; // trim start time in seconds
+  trimDuration?: number; // trim duration in seconds
 }
 
+// Format-specific target sizes in MB
 export interface ConversionSettings {
-  videoTargetMB: number;
-  webpTargetMB: number;
+  targetSizes: Record<FormatId, number>;
 }
 
 export interface VideoInfo {
@@ -53,3 +56,21 @@ export interface Trim {
   colorIndex: number;
   name?: string;
 }
+
+export interface Marker {
+  id: number;
+  time: number;
+  name?: string;
+}
+
+export interface PendingExport {
+  id: string;
+  sourcePath: string;
+  sourceName: string;
+  sourceSize: number;
+  ranges: TrimRange[];
+  duration: number;
+  markers?: Marker[];  // For MKV chapter export
+}
+
+export type ExportStep = "format" | "size" | "progress";

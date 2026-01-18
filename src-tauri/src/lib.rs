@@ -3,7 +3,7 @@
 mod converter;
 mod ffmpeg;
 
-use converter::{convert_file_impl, ConversionResult};
+use converter::{convert_file_impl, ConversionResult, Marker};
 use ffmpeg::{get_ffmpeg_path, get_ffprobe_path, get_video_info};
 use std::fs;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -138,12 +138,14 @@ async fn convert_file(
     app: tauri::AppHandle,
     id: String,
     input_path: String,
+    output_name: String,
     target_bytes: u64,
     conversion_type: String,
     trim_start: Option<f64>,
     trim_duration: Option<f64>,
+    markers: Option<Vec<Marker>>,
 ) -> Result<ConversionResult, String> {
-    convert_file_impl(app, id, input_path, target_bytes, conversion_type, trim_start, trim_duration).await
+    convert_file_impl(app, id, input_path, output_name, target_bytes, conversion_type, trim_start, trim_duration, markers).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
