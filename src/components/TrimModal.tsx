@@ -84,6 +84,7 @@ export function TrimModal({
   const [markersVisible, setMarkersVisible] = useState(true);
   const [editingTrimId, setEditingTrimId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [cachedTimes, setCachedTimes] = useState<number[]>([]);
 
   const isValid = trims.length > 0;
   const videoSrc = convertFileSrc(filePath);
@@ -120,6 +121,7 @@ export function TrimModal({
         }
 
         frameCacheRef.current.set(key, dataUrl);
+        setCachedTimes(prev => [...prev, key]);
       } catch (err) {
         console.error(`[CACHE] Failed to capture frame at ${key}s:`, err);
         // Mark as failed to avoid retrying this frame
@@ -153,6 +155,47 @@ export function TrimModal({
     processQueue();
   }, [getCacheKey, processQueue]);
 
+  // Prefetch frames around a given time (2:1 ratio forward:backward)
+  const prefetchAround = useCallback((fromTime: number, forwardCount: number = 100, backwardCount: number = 50) => {
+    // Clear any pending prefetch frames to prioritize new position
+    captureQueueRef.current = [];
+
+    // Interleave forward and backward: 2 forward, 1 backward
+    let fwd = 1;
+    let bwd = 1;
+    while (fwd <= forwardCount || bwd <= backwardCount) {
+      // 2 forward frames
+      if (fwd <= forwardCount) {
+        const time = fromTime + (fwd * 0.1);
+        if (time <= duration) captureFrame(time);
+        fwd++;
+      }
+      if (fwd <= forwardCount) {
+        const time = fromTime + (fwd * 0.1);
+        if (time <= duration) captureFrame(time);
+        fwd++;
+      }
+      // 1 backward frame
+      if (bwd <= backwardCount) {
+        const time = fromTime - (bwd * 0.1);
+        if (time >= 0) captureFrame(time);
+        bwd++;
+      }
+    }
+  }, [captureFrame, duration]);
+
+  // Auto-prefetch when paused - cache frames around playhead
+  useEffect(() => {
+    if (isPlaying || !open || loading || duration === 0) return;
+
+    // Delay to avoid prefetching during active scrubbing
+    const timeout = setTimeout(() => {
+      prefetchAround(currentTime, 100, 50); // 10s forward, 5s backward
+    }, 500);
+
+    return () => clearTimeout(timeout);
+  }, [isPlaying, currentTime, open, loading, duration, prefetchAround]);
+
   // Load filmstrip and saved data when modal opens
   useEffect(() => {
     if (!open) return;
@@ -168,6 +211,7 @@ export function TrimModal({
     setLoopZone(null);
     setPlayheadLocked(false);
     setCachedFrame(null);
+    setCachedTimes([]);
     frameCacheRef.current.clear();
     capturingRef.current.clear();
     failedCapturesRef.current.clear();
@@ -345,12 +389,15 @@ export function TrimModal({
       video.pause();
       setIsPlaying(false);
     } else {
+      // Sync video position to current UI state before playing
+      // (cached frames may show a different time than video's actual position)
+      video.currentTime = currentTime;
+      prevTimeRef.current = currentTime;
       video.play();
       setIsPlaying(true);
-      setCachedFrame(null); // Hide cache overlay during playback
-      // Keep lock state - don't unlock when playing
+      setCachedFrame(null);
     }
-  }, [isPlaying]);
+  }, [isPlaying, currentTime]);
 
   // Add a new trim at current playhead position (or from loop zone if active)
   const addTrim = useCallback(() => {
@@ -589,19 +636,21 @@ export function TrimModal({
           e.preventDefault();
           goToStart();
           break;
-        // Mode shortcuts
+        // Mode shortcuts - clear selection on any mode change
         case "Digit1":
         case "KeyS":
           e.preventDefault();
           setBarMode('select');
           setPendingTrimStart(null);
           setPendingTrimEnd(null);
-          // Don't clear loopZone when switching to select mode (it's a select mode feature)
+          setLoopZone(null);
           break;
         case "Digit2":
         case "KeyT":
           e.preventDefault();
           setBarMode('trim');
+          setPendingTrimStart(null);
+          setPendingTrimEnd(null);
           setLoopZone(null);
           break;
         case "Digit3":
@@ -918,7 +967,7 @@ export function TrimModal({
                     <Button
                       variant="subtle"
                       size="sm"
-                      onClick={() => setBarMode('select')}
+                      onClick={() => { setBarMode('select'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
                       className={barMode === 'select' ? 'bg-blue-500/20 text-blue-400' : ''}
                     >
                       <MousePointer className="h-4 w-4 mr-1" />
@@ -934,7 +983,7 @@ export function TrimModal({
                     <Button
                       variant="subtle"
                       size="sm"
-                      onClick={() => setBarMode('trim')}
+                      onClick={() => { setBarMode('trim'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
                       className={barMode === 'trim' ? 'bg-yellow-500/20 text-yellow-400' : ''}
                     >
                       <Scissors className="h-4 w-4 mr-1" />
@@ -950,7 +999,7 @@ export function TrimModal({
                     <Button
                       variant="subtle"
                       size="sm"
-                      onClick={() => setBarMode('marker')}
+                      onClick={() => { setBarMode('marker'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
                       className={barMode === 'marker' ? 'bg-red-500/20 text-red-400' : ''}
                     >
                       <SquareSplitHorizontal className="h-4 w-4 mr-1" />
@@ -1021,6 +1070,7 @@ export function TrimModal({
               onLoopZoneChange={setLoopZone}
               playheadLocked={playheadLocked}
               onPlayheadLockChange={setPlayheadLocked}
+              cachedTimes={cachedTimes}
             />
           ) : (
             <div className="h-16 bg-muted rounded-lg flex items-center justify-center text-sm text-muted-foreground">

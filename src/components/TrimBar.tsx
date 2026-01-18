@@ -98,6 +98,8 @@ interface TrimBarProps {
   // Playhead lock (seek mode - click to lock/unlock hover following)
   playheadLocked: boolean;
   onPlayheadLockChange: (locked: boolean) => void;
+  // Cached frame times for visual indicator
+  cachedTimes?: number[];
 }
 
 export function TrimBar({
@@ -123,6 +125,7 @@ export function TrimBar({
   onLoopZoneChange,
   playheadLocked,
   onPlayheadLockChange,
+  cachedTimes = [],
 }: TrimBarProps) {
   const barRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
@@ -550,6 +553,26 @@ export function TrimBar({
               style={{ backgroundImage: frame ? `url(${frame})` : undefined }}
             />
           ))}
+        </div>
+      )}
+
+      {/* Cache indicator - shows which frames are cached */}
+      {cachedTimes.length > 0 && (
+        <div className="absolute bottom-0 left-0 right-0 h-1 pointer-events-none">
+          {cachedTimes.map((time) => {
+            const percent = (time / duration) * 100;
+            const widthPercent = (0.1 / duration) * 100; // Each cache entry covers 0.1s
+            return (
+              <div
+                key={time}
+                className="absolute top-0 bottom-0 bg-green-500/70"
+                style={{
+                  left: `${percent}%`,
+                  width: `${Math.max(widthPercent, 0.5)}%`, // Min width for visibility
+                }}
+              />
+            );
+          })}
         </div>
       )}
 
