@@ -68,7 +68,7 @@ jobs:
           retention-days: 5
 
   build-macos:
-    runs-on: macos-15-intel  # Use Intel runner for x64 builds
+    runs-on: macos-latest  # ARM runner (Apple Silicon)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,21 +87,12 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Download FFmpeg (macOS)
+      - name: Install FFmpeg (macOS ARM)
         run: |
-          echo "Downloading FFmpeg..."
-          curl -L -o /tmp/ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/zip"
-          curl -L -o /tmp/ffprobe.zip "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
-
-          echo "Extracting FFmpeg..."
-          unzip -o /tmp/ffmpeg.zip -d /tmp/ffmpeg
-          unzip -o /tmp/ffprobe.zip -d /tmp/ffprobe
-
-          echo "Copying FFmpeg binaries..."
-          cp /tmp/ffmpeg/ffmpeg src-tauri/ffmpeg/ffmpeg
-          cp /tmp/ffprobe/ffprobe src-tauri/ffmpeg/ffprobe
+          brew install ffmpeg
+          cp $(which ffmpeg) src-tauri/ffmpeg/ffmpeg
+          cp $(which ffprobe) src-tauri/ffmpeg/ffprobe
           chmod +x src-tauri/ffmpeg/ffmpeg src-tauri/ffmpeg/ffprobe
-
           echo "FFmpeg binaries ready:"
           ls -la src-tauri/ffmpeg/
 
@@ -202,7 +193,7 @@ jobs:
 
           # Rename artifacts to version-less names for stable download URLs
           cp artifacts/windows-installer/*.exe release-assets/Torchio-windows-x64.exe || true
-          cp artifacts/macos-dmg/*.dmg release-assets/Torchio-macos-x64.dmg || true
+          cp artifacts/macos-dmg/*.dmg release-assets/Torchio-macos-arm64.dmg || true
           cp artifacts/linux-deb/*.deb release-assets/Torchio-linux-amd64.deb || true
 
           echo "Release assets:"
@@ -231,7 +222,7 @@ jobs:
           | Platform | Download |
           |----------|----------|
           | Windows | [Torchio-windows-x64.exe](https://github.com/${{ github.repository }}/releases/latest/download/Torchio-windows-x64.exe) |
-          | macOS | [Torchio-macos-x64.dmg](https://github.com/${{ github.repository }}/releases/latest/download/Torchio-macos-x64.dmg) |
+          | macOS (Apple Silicon) | [Torchio-macos-arm64.dmg](https://github.com/${{ github.repository }}/releases/latest/download/Torchio-macos-arm64.dmg) |
           | Linux | [Torchio-linux-amd64.deb](https://github.com/${{ github.repository }}/releases/latest/download/Torchio-linux-amd64.deb) |
 
           ### Installation Notes
