@@ -120,7 +120,6 @@ export function TrimModal({
         }
 
         frameCacheRef.current.set(key, dataUrl);
-        console.log(`[CACHE] Captured frame at ${key}s (cache size: ${frameCacheRef.current.size})`);
       } catch (err) {
         console.error(`[CACHE] Failed to capture frame at ${key}s:`, err);
         // Mark as failed to avoid retrying this frame
@@ -195,19 +194,9 @@ export function TrimModal({
         const savedMarkers = await store.get<number[]>(`${key}_markers`);
         const savedNextId = await store.get<number>(`${key}_nextId`);
 
-        if (savedTrims && savedTrims.length > 0) {
-          setTrims(savedTrims);
-          setNextTrimId(savedNextId ?? savedTrims.length + 1);
-        } else {
-          setTrims([]);
-          setNextTrimId(1);
-        }
-
-        if (savedMarkers && savedMarkers.length > 0) {
-          setLockedTimes(savedMarkers);
-        } else {
-          setLockedTimes([]);
-        }
+        setTrims(savedTrims ?? []);
+        setNextTrimId(savedNextId ?? (savedTrims?.length ?? 0) + 1);
+        setLockedTimes(savedMarkers ?? []);
       } catch (e) {
         console.error("Failed to load data:", e);
         setTrims([]);
@@ -502,15 +491,11 @@ export function TrimModal({
     const cached = frameCacheRef.current.get(cacheKey);
 
     if (cached) {
-      // Cache hit! Show cached frame instantly (no video seek needed)
-      console.log(`[CACHE] HIT at ${cacheKey}s`);
       setCachedFrame(cached);
     } else {
-      // Cache miss - use accurate seek (not fastSeek) to get exact frame
-      console.log(`[CACHE] MISS at ${cacheKey}s - seeking video`);
       setCachedFrame(null);
       pendingCaptureRef.current = time;
-      video.currentTime = time; // Accurate seek for correct frame capture
+      video.currentTime = time;
     }
   };
 
@@ -520,9 +505,7 @@ export function TrimModal({
       return;
     }
 
-    // Capture frame if we have a pending capture request
     if (pendingCaptureRef.current !== null) {
-      console.log(`[CACHE] handleSeeked - capturing pending frame at ${pendingCaptureRef.current}s`);
       captureFrame(pendingCaptureRef.current);
       pendingCaptureRef.current = null;
     }
