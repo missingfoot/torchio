@@ -539,7 +539,7 @@ export function TrimBar({
   return (
     <div
       ref={barRef}
-      className={`relative h-16 bg-muted overflow-hidden select-none ${cursorClass}`}
+      className={`relative h-16 bg-muted overflow-visible select-none ${cursorClass}`}
       onMouseMove={(e) => {
         if (onHover && !isDraggingRef.current && !isClickingRef.current) {
           const time = getTimeFromPosition(e.clientX);
@@ -551,7 +551,7 @@ export function TrimBar({
     >
       {/* Filmstrip background */}
       {filmstrip.length > 0 && (
-        <div className="absolute inset-0 flex">
+        <div className="absolute inset-0 flex overflow-hidden rounded-lg">
           {filmstrip.map((frame, i) => (
             <div
               key={i}
@@ -626,10 +626,18 @@ export function TrimBar({
         const leftPercent = (marker.time / duration) * 100;
         return (
           <div key={marker.id} className="pointer-events-none z-20">
-            {/* Red dot above the timeline */}
+            {/* Triangle flag above the timeline - point touches the top */}
             <div
-              className={`absolute -top-2 w-3 h-3 rounded-full border-2 border-background transition-transform ${isSelected ? 'bg-red-500 scale-125' : 'bg-red-400'}`}
-              style={{ left: `calc(${leftPercent}% - 6px)` }}
+              className="absolute"
+              style={{
+                left: `calc(${leftPercent}% - 5px)`,
+                top: -5,
+                width: 0,
+                height: 0,
+                borderLeft: '5px solid transparent',
+                borderRight: '5px solid transparent',
+                borderTop: isSelected ? '6px solid white' : '6px solid #f87171',
+              }}
             />
             {/* Vertical line */}
             <div

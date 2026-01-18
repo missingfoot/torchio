@@ -1,15 +1,21 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { SquareSplitHorizontal, Plus, MousePointer, Scissors, Trash2, Eye, EyeOff, Volume2, VolumeX, Wand2, Loader2 } from "lucide-react";
+import { SquareSplitHorizontal, MousePointer, Scissors } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Store } from "@tauri-apps/plugin-store";
 import { Modal, ModalHeader, ModalTitle } from "./ui/modal";
 import { Button, ButtonGroup } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { TrimBar } from "./TrimBar";
+import { TrimSidebar } from "./TrimSidebar";
+import { PlaybackControls } from "./PlaybackControls";
 import { formatDuration } from "@/lib/utils";
 import { useExport } from "@/contexts/ExportContext";
-import type { Trim, Marker } from "@/types";
+import { useFrameCache } from "@/hooks/useFrameCache";
+import { useTrimPersistence } from "@/hooks/useTrimPersistence";
+import { useVideoPlayback } from "@/hooks/useVideoPlayback";
+import { useTrimManager, TRIM_COLORS } from "@/hooks/useTrimManager";
+import { useMarkerManager } from "@/hooks/useMarkerManager";
+import { useTrimKeyboardShortcuts } from "@/hooks/useTrimKeyboardShortcuts";
 
 interface TrimModalProps {
   open: boolean;
@@ -20,31 +26,6 @@ interface TrimModalProps {
   onCancel: () => void;
   onExportStarted?: () => void;
 }
-
-const QUICK_DURATIONS = [2, 5, 8, 10, 15, 20, 25, 30];
-
-// Persistence store for trims/markers
-let trimStore: Store | null = null;
-async function getTrimStore(): Promise<Store> {
-  if (!trimStore) {
-    trimStore = await Store.load("trim-data.json");
-  }
-  return trimStore;
-}
-
-// Create a safe key from file path
-function getStorageKey(filePath: string): string {
-  return filePath.replace(/[\\/:*?"<>|]/g, "_");
-}
-
-// Color palette for trims
-const TRIM_COLORS = [
-  { name: 'yellow', border: 'border-yellow-400', bg: 'bg-yellow-400/20', dot: 'bg-yellow-400', text: 'text-yellow-400' },
-  { name: 'cyan', border: 'border-cyan-400', bg: 'bg-cyan-400/20', dot: 'bg-cyan-400', text: 'text-cyan-400' },
-  { name: 'fuchsia', border: 'border-fuchsia-400', bg: 'bg-fuchsia-400/20', dot: 'bg-fuchsia-400', text: 'text-fuchsia-400' },
-  { name: 'green', border: 'border-green-400', bg: 'bg-green-400/20', dot: 'bg-green-400', text: 'text-green-400' },
-  { name: 'orange', border: 'border-orange-400', bg: 'bg-orange-400/20', dot: 'bg-orange-400', text: 'text-orange-400' },
-];
 
 type BarMode = 'select' | 'trim' | 'marker';
 
@@ -59,193 +40,123 @@ export function TrimModal({
 }: TrimModalProps) {
   const { openPanel, isExporting } = useExport();
   const videoRef = useRef<HTMLVideoElement>(null);
-  const prevTimeRef = useRef(0);
-  const animationFrameRef = useRef<number | null>(null);
-  const loadedFileRef = useRef<string | null>(null); // Track which file's data is loaded
-  const frameCacheRef = useRef<Map<number, string>>(new Map());
   const pendingCaptureRef = useRef<number | null>(null);
-  const capturingRef = useRef<Set<number>>(new Set()); // Track in-progress captures
-  const failedCapturesRef = useRef<Set<number>>(new Set()); // Track failed captures to avoid retrying
-  const captureQueueRef = useRef<number[]>([]); // Queue for pending captures
-  const processingQueueRef = useRef<boolean>(false); // Whether queue is being processed
-  const [cachedFrame, setCachedFrame] = useState<string | null>(null);
+  const frameCacheRef = useRef<Map<number, string>>(new Map());
+
+  // UI state
   const [duration, setDuration] = useState(0);
-  const [trims, setTrims] = useState<Trim[]>([]);
-  const [nextTrimId, setNextTrimId] = useState(1);
-  const [trimsVisible, setTrimsVisible] = useState(true);
   const [filmstrip, setFilmstrip] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [presetsOpen, setPresetsOpen] = useState(false);
-  const [markers, setMarkers] = useState<Marker[]>([]);
-  const [nextMarkerId, setNextMarkerId] = useState(1);
+  const [cachedFrame, setCachedFrame] = useState<string | null>(null);
+  const [trimsVisible, setTrimsVisible] = useState(true);
+  const [markersVisible, setMarkersVisible] = useState(true);
   const [barMode, setBarMode] = useState<BarMode>('select');
   const [pendingTrimStart, setPendingTrimStart] = useState<number | null>(null);
-  const [pendingTrimEnd, setPendingTrimEnd] = useState<number | null>(null); // Set during drag
+  const [pendingTrimEnd, setPendingTrimEnd] = useState<number | null>(null);
   const [loopZone, setLoopZone] = useState<{ start: number; end: number } | null>(null);
   const [playheadLocked, setPlayheadLocked] = useState(false);
   const [showRemaining, setShowRemaining] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<'trims' | 'markers'>('trims');
-  const [markersVisible, setMarkersVisible] = useState(true);
-  const [editingTrimId, setEditingTrimId] = useState<number | null>(null);
-  const [editingName, setEditingName] = useState('');
-  const [editingMarkerId, setEditingMarkerId] = useState<number | null>(null);
-  const [editingMarkerName, setEditingMarkerName] = useState('');
-  const [selectedMarkerId, setSelectedMarkerId] = useState<number | null>(null);
-  const [cachedTimes, setCachedTimes] = useState<number[]>([]);
-  const [isMuted, setIsMuted] = useState(false);
-  const [volume, setVolume] = useState(0.7);
-  const [isDetectingScenes, setIsDetectingScenes] = useState(false);
-  const [autoDetectOpen, setAutoDetectOpen] = useState(false);
 
-  const isValid = true; // Always allow continue - if no trims, export full video
+  const isValid = true;
   const videoSrc = convertFileSrc(filePath);
 
-  // Frame cache helpers - quantize time to 0.1s intervals for cache keys
-  const getCacheKey = useCallback((time: number) => Math.round(time * 10) / 10, []);
+  // Frame cache hook
+  const frameCache = useFrameCache({
+    filePath,
+    duration,
+  });
 
-  // Process the capture queue one at a time to prevent backend race conditions
-  const processQueue = useCallback(async () => {
-    if (processingQueueRef.current || captureQueueRef.current.length === 0) {
-      return;
-    }
-
-    processingQueueRef.current = true;
-
-    while (captureQueueRef.current.length > 0) {
-      const key = captureQueueRef.current.shift()!;
-
-      // Skip if already cached or failed
-      if (frameCacheRef.current.has(key) || failedCapturesRef.current.has(key)) {
-        continue;
-      }
-
-      capturingRef.current.add(key);
-
-      try {
-        // Use the key (quantized time) for extraction
-        const dataUrl = await invoke<string>("extract_frame", { path: filePath, timestamp: key });
-
-        // Limit cache size to ~400 frames (FIFO eviction)
-        if (frameCacheRef.current.size > 400) {
-          const firstKey = frameCacheRef.current.keys().next().value;
-          if (firstKey !== undefined) frameCacheRef.current.delete(firstKey);
-        }
-
-        frameCacheRef.current.set(key, dataUrl);
-        setCachedTimes(prev => [...prev, key]);
-      } catch (err) {
-        console.error(`[CACHE] Failed to capture frame at ${key}s:`, err);
-        // Mark as failed to avoid retrying this frame
-        failedCapturesRef.current.add(key);
-      } finally {
-        capturingRef.current.delete(key);
-      }
-    }
-
-    processingQueueRef.current = false;
+  // Keep local ref in sync with hook's cache for playback loop
+  useEffect(() => {
+    frameCacheRef.current = new Map();
   }, [filePath]);
 
-  // Queue a frame for capture (non-blocking, sequential processing)
-  const captureFrame = useCallback((time: number) => {
-    const key = getCacheKey(time);
+  // Persistence hook
+  const persistence = useTrimPersistence({
+    filePath,
+    enabled: open,
+  });
 
-    // Skip if already cached, failed, capturing, or already queued
-    if (
-      frameCacheRef.current.has(key) ||
-      failedCapturesRef.current.has(key) ||
-      capturingRef.current.has(key) ||
-      captureQueueRef.current.includes(key)
-    ) {
-      return;
-    }
+  // Video playback hook
+  const playback = useVideoPlayback({
+    videoRef,
+    duration,
+    loopZone,
+    trims: persistence.trims,
+    onFrameCapture: frameCache.captureFrame,
+    getCacheKey: frameCache.getCacheKey,
+    frameCacheRef,
+  });
 
-    // Add to queue
-    captureQueueRef.current.push(key);
+  // Clear loop zone callback
+  const clearLoopZone = useCallback(() => setLoopZone(null), []);
 
-    // Start processing if not already running
-    processQueue();
-  }, [getCacheKey, processQueue]);
+  // Trim manager hook
+  const trimManager = useTrimManager({
+    trims: persistence.trims,
+    setTrims: persistence.setTrims,
+    nextTrimId: persistence.nextTrimId,
+    setNextTrimId: persistence.setNextTrimId,
+    duration,
+    currentTime: playback.currentTime,
+    loopZone,
+    onLoopZoneClear: clearLoopZone,
+    filePath,
+  });
 
-  // Prefetch frames around a given time (2:1 ratio forward:backward)
-  const prefetchAround = useCallback((fromTime: number, forwardCount: number = 100, backwardCount: number = 50) => {
-    // Clear any pending prefetch frames to prioritize new position
-    captureQueueRef.current = [];
+  // Marker manager hook
+  const markerManager = useMarkerManager({
+    markers: persistence.markers,
+    setMarkers: persistence.setMarkers,
+    nextMarkerId: persistence.nextMarkerId,
+    setNextMarkerId: persistence.setNextMarkerId,
+    duration,
+    currentTime: playback.currentTime,
+    loopZone,
+    onLoopZoneClear: clearLoopZone,
+  });
 
-    // Interleave forward and backward: 2 forward, 1 backward
-    let fwd = 1;
-    let bwd = 1;
-    while (fwd <= forwardCount || bwd <= backwardCount) {
-      // 2 forward frames
-      if (fwd <= forwardCount) {
-        const time = fromTime + (fwd * 0.1);
-        if (time <= duration) captureFrame(time);
-        fwd++;
-      }
-      if (fwd <= forwardCount) {
-        const time = fromTime + (fwd * 0.1);
-        if (time <= duration) captureFrame(time);
-        fwd++;
-      }
-      // 1 backward frame
-      if (bwd <= backwardCount) {
-        const time = fromTime - (bwd * 0.1);
-        if (time >= 0) captureFrame(time);
-        bwd++;
-      }
-    }
-  }, [captureFrame, duration]);
+  // Keyboard shortcuts hook
+  useTrimKeyboardShortcuts({
+    enabled: open,
+    togglePlay: playback.togglePlay,
+    stepFrame: playback.stepFrame,
+    goToStart: playback.goToStart,
+    setBarMode,
+    clearPendingTrim: () => {
+      setPendingTrimStart(null);
+      setPendingTrimEnd(null);
+    },
+    clearLoopZone,
+    toggleTrimsVisible: () => setTrimsVisible(prev => !prev),
+    pendingTrimStart,
+    loopZone,
+  });
 
-  // Auto-prefetch when paused - cache frames around playhead
-  useEffect(() => {
-    if (isPlaying || !open || loading || duration === 0) return;
+  // Extract stable references from hooks to avoid infinite re-render loops
+  // (hook return objects are new references every render)
+  const clearFrameCache = frameCache.clearCache;
+  const prefetchAroundTime = frameCache.prefetchAround;
+  const setPlaybackTime = playback.setCurrentTime;
 
-    // Delay to avoid prefetching during active scrubbing
-    const timeout = setTimeout(() => {
-      prefetchAround(currentTime, 100, 50); // 10s forward, 5s backward
-    }, 500);
-
-    return () => clearTimeout(timeout);
-  }, [isPlaying, currentTime, open, loading, duration, prefetchAround]);
-
-  // Load filmstrip and saved data when modal opens
+  // Load filmstrip when modal opens
   useEffect(() => {
     if (!open) return;
 
-    // Clear loaded file ref to prevent saving old data to new file
-    loadedFileRef.current = null;
-
-    setLoading(true);
+    // Reset UI state
     setFilmstrip([]);
-    setTrims([]);
-    setNextTrimId(1);
-    setMarkers([]);
-    setNextMarkerId(1);
-    setSelectedMarkerId(null);
+    setDuration(0);
     setTrimsVisible(true);
-    setIsPlaying(false);
-    setCurrentTime(0);
-    prevTimeRef.current = 0;
-    if (videoRef.current) {
-      videoRef.current.currentTime = 0;
-    }
+    setMarkersVisible(true);
     setBarMode('select');
     setPendingTrimStart(null);
     setPendingTrimEnd(null);
     setLoopZone(null);
     setPlayheadLocked(false);
     setCachedFrame(null);
-    setCachedTimes([]);
-    frameCacheRef.current.clear();
-    capturingRef.current.clear();
-    failedCapturesRef.current.clear();
-    captureQueueRef.current = [];
-    processingQueueRef.current = false;
+    clearFrameCache();
 
-    const loadData = async () => {
+    const loadFilmstrip = async () => {
       try {
-        // Load video duration and filmstrip
         const dur = await invoke<number>("get_video_duration", { path: filePath });
         setDuration(dur);
 
@@ -255,96 +166,48 @@ export function TrimModal({
           count: 10,
         });
         setFilmstrip(frames);
-
-        // Load saved trims and markers for this file
-        const store = await getTrimStore();
-        const key = getStorageKey(filePath);
-        const savedTrims = await store.get<Trim[]>(`${key}_trims`);
-        const savedNextTrimId = await store.get<number>(`${key}_nextId`);
-
-        // Load markers with migration from old number[] format
-        const savedMarkersRaw = await store.get<Marker[] | number[]>(`${key}_markers`);
-        const savedNextMarkerId = await store.get<number>(`${key}_nextMarkerId`);
-
-        // Migrate old number[] markers to Marker[] format
-        let loadedMarkers: Marker[] = [];
-        if (savedMarkersRaw && Array.isArray(savedMarkersRaw)) {
-          if (savedMarkersRaw.length > 0) {
-            if (typeof savedMarkersRaw[0] === 'number') {
-              // Old format: number[] - migrate to Marker[]
-              loadedMarkers = (savedMarkersRaw as number[]).map((time, index) => ({
-                id: index + 1,
-                time,
-                name: `Chapter ${index + 1}`,
-              }));
-            } else {
-              // New format: Marker[]
-              loadedMarkers = savedMarkersRaw as Marker[];
-            }
-          }
-        }
-
-        setTrims(savedTrims ?? []);
-        setNextTrimId(savedNextTrimId ?? (savedTrims?.length ?? 0) + 1);
-        setMarkers(loadedMarkers);
-        setNextMarkerId(savedNextMarkerId ?? (loadedMarkers.length > 0 ? Math.max(...loadedMarkers.map(m => m.id)) + 1 : 1));
-
-        // Mark this file as loaded - enables saving
-        loadedFileRef.current = filePath;
       } catch (e) {
-        console.error("Failed to load data:", e);
-        setTrims([]);
-        setNextTrimId(1);
-        setMarkers([]);
-        setNextMarkerId(1);
-        loadedFileRef.current = filePath; // Still enable saving even on error
-      } finally {
-        setLoading(false);
+        console.error("Failed to load filmstrip:", e);
       }
     };
 
-    loadData();
-  }, [open, filePath]);
+    loadFilmstrip();
+  }, [open, filePath, clearFrameCache]);
 
-  // Save trims when they change
+  // Reset playback state when modal opens
   useEffect(() => {
-    // Only save if this file's data has been loaded (prevents saving old data to new file)
-    if (!open || loading || loadedFileRef.current !== filePath) return;
+    if (!open) return;
 
-    const saveTrims = async () => {
-      try {
-        const store = await getTrimStore();
-        const key = getStorageKey(filePath);
-        await store.set(`${key}_trims`, trims);
-        await store.set(`${key}_nextId`, nextTrimId);
-        await store.save();
-      } catch (e) {
-        console.error("Failed to save trims:", e);
-      }
-    };
+    setPlaybackTime(0);
+    if (videoRef.current) {
+      videoRef.current.currentTime = 0;
+    }
+  }, [open, setPlaybackTime]);
 
-    saveTrims();
-  }, [trims, nextTrimId, open, loading, filePath]);
-
-  // Save markers when they change
+  // Auto-prefetch when paused
   useEffect(() => {
-    // Only save if this file's data has been loaded (prevents saving old data to new file)
-    if (!open || loading || loadedFileRef.current !== filePath) return;
+    if (playback.isPlaying || !open || persistence.loading || duration === 0) return;
 
-    const saveMarkers = async () => {
-      try {
-        const store = await getTrimStore();
-        const key = getStorageKey(filePath);
-        await store.set(`${key}_markers`, markers);
-        await store.set(`${key}_nextMarkerId`, nextMarkerId);
-        await store.save();
-      } catch (e) {
-        console.error("Failed to save markers:", e);
-      }
-    };
+    const timeout = setTimeout(() => {
+      prefetchAroundTime(playback.currentTime, 100, 50);
+    }, 500);
 
-    saveMarkers();
-  }, [markers, nextMarkerId, open, loading, filePath]);
+    return () => clearTimeout(timeout);
+  }, [playback.isPlaying, playback.currentTime, open, persistence.loading, duration, prefetchAroundTime]);
+
+  // Deselect marker when playhead moves away from it
+  useEffect(() => {
+    if (markerManager.selectedMarkerId === null) return;
+
+    const selectedMarker = persistence.markers.find(m => m.id === markerManager.selectedMarkerId);
+    if (!selectedMarker) return;
+
+    // Threshold: if playhead is more than 0.5s away, deselect
+    const threshold = 0.5;
+    if (Math.abs(playback.currentTime - selectedMarker.time) > threshold) {
+      markerManager.setSelectedMarkerId(null);
+    }
+  }, [playback.currentTime, markerManager.selectedMarkerId, persistence.markers, markerManager]);
 
   // Handle video metadata loaded
   const handleLoadedMetadata = () => {
@@ -354,316 +217,30 @@ export function TrimModal({
     }
   };
 
-  // Sync volume to video element
-  useEffect(() => {
-    const video = videoRef.current;
-    if (video) {
-      video.volume = volume;
-    }
-  }, [volume]);
-
-  // Handle video time updates (UI only - looping handled by RAF loop)
+  // Handle video time updates
   const handleTimeUpdate = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
-    setCurrentTime(video.currentTime);
-  }, []);
+    playback.setCurrentTime(video.currentTime);
+  }, [playback]);
 
-  // High-precision playback loop using requestAnimationFrame (~60fps)
-  // This ensures we catch trim boundaries precisely, unlike timeupdate (~4fps)
-  useEffect(() => {
-    if (!isPlaying) {
-      // Stop the RAF loop when paused
-      if (animationFrameRef.current !== null) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
-      return;
-    }
-
-    let lastCaptureTime = -1;
-
-    const checkPlayback = () => {
-      const video = videoRef.current;
-      if (!video || video.paused) {
-        animationFrameRef.current = null;
-        return;
-      }
-
-      const prevTime = prevTimeRef.current;
-      const currTime = video.currentTime;
-      prevTimeRef.current = currTime;
-
-      // Update UI at 60fps for smooth playhead movement
-      setCurrentTime(currTime);
-
-      // Cache frames during playback (every 0.1s to match cache key quantization)
-      const cacheKey = getCacheKey(currTime);
-      if (cacheKey !== lastCaptureTime && !frameCacheRef.current.has(cacheKey)) {
-        captureFrame(currTime);
-        lastCaptureTime = cacheKey;
-      }
-
-      // Loop zone takes priority
-      if (loopZone) {
-        if (currTime >= loopZone.end) {
-          video.currentTime = loopZone.start;
-          prevTimeRef.current = loopZone.start;
-        }
-        animationFrameRef.current = requestAnimationFrame(checkPlayback);
-        return;
-      }
-
-      // Trim looping - works in all modes when playing
-      if (trims.length > 0) {
-        for (const trim of trims) {
-          const wasInTrim = prevTime >= trim.startTime && prevTime < trim.endTime;
-          const nowAtOrPastEnd = currTime >= trim.endTime;
-
-          if (wasInTrim && nowAtOrPastEnd) {
-            // Crossed from inside trim to past end - loop back
-            video.currentTime = trim.startTime;
-            prevTimeRef.current = trim.startTime;
-            break;
-          }
-        }
-      }
-
-      animationFrameRef.current = requestAnimationFrame(checkPlayback);
-    };
-
-    // Start the loop
-    animationFrameRef.current = requestAnimationFrame(checkPlayback);
-
-    // Cleanup on unmount or when deps change
-    return () => {
-      if (animationFrameRef.current !== null) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
-    };
-  }, [isPlaying, loopZone, trims, getCacheKey, captureFrame]);
-
-  const togglePlay = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    if (isPlaying) {
-      video.pause();
-      setIsPlaying(false);
-    } else {
-      // Sync video position to current UI state before playing
-      // (cached frames may show a different time than video's actual position)
-      video.currentTime = currentTime;
-      prevTimeRef.current = currentTime;
-      video.play().catch(() => {
-        // Ignore AbortError - happens when pause() is called before play() resolves
-      });
-      setIsPlaying(true);
-      setCachedFrame(null);
-    }
-  }, [isPlaying, currentTime]);
-
-  // Add a new trim at current playhead position (or from loop zone if active)
-  const addTrim = useCallback(() => {
-    let start: number;
-    let end: number;
-
-    // If loop zone exists, use its bounds
-    if (loopZone) {
-      start = loopZone.start;
-      end = loopZone.end;
-      setLoopZone(null);
-    } else {
-      // Default behavior: 5 seconds from playhead
-      const defaultDuration = 5;
-      start = currentTime;
-      end = Math.min(start + defaultDuration, duration);
-    }
-
-    const newTrim: Trim = {
-      id: nextTrimId,
-      startTime: start,
-      endTime: end,
-      colorIndex: trims.length % TRIM_COLORS.length,
-    };
-
-    setTrims(prev => [...prev, newTrim]);
-    setNextTrimId(prev => prev + 1);
-  }, [loopZone, currentTime, duration, nextTrimId, trims.length]);
-
-  // Create a trim with specific start and end times (from trim bar)
-  const createTrim = useCallback((startTime: number, endTime: number) => {
-    const newTrim: Trim = {
-      id: nextTrimId,
-      startTime: Math.max(0, startTime),
-      endTime: Math.min(endTime, duration),
-      colorIndex: trims.length % TRIM_COLORS.length,
-    };
-
-    setTrims(prev => [...prev, newTrim]);
-    setNextTrimId(prev => prev + 1);
-  }, [nextTrimId, trims.length, duration]);
-
-  // Auto-detect scenes and create trims at cut points
-  const handleAutoDetect = useCallback(async (threshold: number) => {
-    if (isDetectingScenes || !filePath) return;
-
-    setAutoDetectOpen(false);
-    setIsDetectingScenes(true);
-    try {
-      const timestamps = await invoke<number[]>("detect_scenes", {
-        path: filePath,
-        threshold,
-      });
-
-      // Create boundaries: 0 + detected cuts + duration
-      const points = [0, ...timestamps, duration].sort((a, b) => a - b);
-
-      // Create trims between consecutive points
-      const newTrims: Trim[] = [];
-      for (let i = 0; i < points.length - 1; i++) {
-        const start = points[i];
-        const end = points[i + 1];
-        // Skip very short segments (< 0.5s)
-        if (end - start < 0.5) continue;
-
-        newTrims.push({
-          id: nextTrimId + i,
-          startTime: start,
-          endTime: end,
-          colorIndex: (trims.length + i) % TRIM_COLORS.length,
-        });
-      }
-
-      if (newTrims.length > 0) {
-        setTrims(prev => [...prev, ...newTrims]);
-        setNextTrimId(prev => prev + newTrims.length);
-      }
-    } catch (err) {
-      console.error("Scene detection failed:", err);
-    } finally {
-      setIsDetectingScenes(false);
-    }
-  }, [isDetectingScenes, filePath, duration, nextTrimId, trims.length]);
-
-  // Delete a trim by id
-  const deleteTrim = useCallback((id: number) => {
-    setTrims(prev => prev.filter(t => t.id !== id));
-  }, []);
-
-  // Update a trim's start or end time (snapping is handled in TrimBar)
-  const updateTrim = useCallback((id: number, startTime: number, endTime: number) => {
-    setTrims(prev => prev.map(t =>
-      t.id === id
-        ? { ...t, startTime: Math.max(0, startTime), endTime: Math.min(duration, endTime) }
-        : t
-    ));
-
-    // Update video position to show the change
-    if (videoRef.current) {
-      videoRef.current.currentTime = startTime;
-      setCurrentTime(startTime);
-      prevTimeRef.current = startTime;
-    }
-  }, [duration]);
-
-  // Update trim name
-  const updateTrimName = useCallback((id: number, name: string) => {
-    setTrims(prev => prev.map(t =>
-      t.id === id ? { ...t, name: name.trim() || undefined } : t
-    ));
-  }, []);
-
-  // Start editing a trim name
-  const startEditingTrimName = useCallback((trim: Trim, index: number) => {
-    setEditingTrimId(trim.id);
-    setEditingName(trim.name || `Trim ${index + 1}`);
-  }, []);
-
-  // Save the edited trim name
-  const saveEditingTrimName = useCallback(() => {
-    if (editingTrimId !== null) {
-      updateTrimName(editingTrimId, editingName);
-      setEditingTrimId(null);
-      setEditingName('');
-    }
-  }, [editingTrimId, editingName, updateTrimName]);
-
-  // Marker CRUD handlers
-  const addMarker = useCallback((time: number) => {
-    // Avoid duplicates within threshold
-    const snapThreshold = duration * 0.01;
-    const isDuplicate = markers.some(m => Math.abs(m.time - time) < snapThreshold);
-    if (isDuplicate) return;
-
-    const newMarker: Marker = {
-      id: nextMarkerId,
-      time,
-      name: `Chapter ${nextMarkerId}`,
-    };
-    setMarkers(prev => [...prev, newMarker].sort((a, b) => a.time - b.time));
-    setNextMarkerId(prev => prev + 1);
-  }, [duration, markers, nextMarkerId]);
-
-  const deleteMarker = useCallback((id: number) => {
-    setMarkers(prev => prev.filter(m => m.id !== id));
-    if (selectedMarkerId === id) setSelectedMarkerId(null);
-  }, [selectedMarkerId]);
-
-  const updateMarkerName = useCallback((id: number, name: string) => {
-    setMarkers(prev => prev.map(m => m.id === id ? { ...m, name: name.trim() || undefined } : m));
-  }, []);
-
-  const startEditingMarkerName = useCallback((marker: Marker, index: number) => {
-    setEditingMarkerId(marker.id);
-    setEditingMarkerName(marker.name || `Chapter ${index + 1}`);
-  }, []);
-
-  const saveEditingMarkerName = useCallback(() => {
-    if (editingMarkerId !== null) {
-      updateMarkerName(editingMarkerId, editingMarkerName);
-      setEditingMarkerId(null);
-      setEditingMarkerName('');
-    }
-  }, [editingMarkerId, editingMarkerName, updateMarkerName]);
-
-  // Add marker at playhead (or both ends of loop zone if active)
-  const addMarkerAtPlayhead = useCallback(() => {
-    if (loopZone) {
-      // Add markers at both ends of loop zone
-      addMarker(loopZone.start);
-      addMarker(loopZone.end);
-      setLoopZone(null);
-    } else {
-      // Default: add at current time
-      addMarker(currentTime);
-    }
-  }, [loopZone, currentTime, addMarker]);
-
+  // Handle hover on trim bar
   const handleHover = (time: number | null) => {
-    // Handle hover end - keep showing last frame, don't jerk
     if (time === null) {
       pendingCaptureRef.current = null;
-      // Don't hide cached frame or seek - keeps display stable
-      // Video position syncs on play via togglePlay
       return;
     }
 
-    // Skip if playing or locked
-    if (isPlaying) return;
+    if (playback.isPlaying) return;
     if (barMode === 'select' && playheadLocked) return;
 
     const video = videoRef.current;
     if (!video) return;
 
-    // Update UI and refs
-    setCurrentTime(time);
-    prevTimeRef.current = time;
+    playback.setCurrentTime(time);
+    playback.prevTimeRef.current = time;
 
-    // Check frame cache first
-    const cacheKey = getCacheKey(time);
-    const cached = frameCacheRef.current.get(cacheKey);
+    const cached = frameCache.getCachedFrame(time);
 
     if (cached) {
       setCachedFrame(cached);
@@ -674,141 +251,32 @@ export function TrimModal({
     }
   };
 
-  // Capture frames after video seeks (for caching)
+  // Capture frames after video seeks
   const handleSeeked = useCallback(() => {
-    if (isPlaying) {
-      return;
-    }
+    if (playback.isPlaying) return;
 
     if (pendingCaptureRef.current !== null) {
-      captureFrame(pendingCaptureRef.current);
+      frameCache.captureFrame(pendingCaptureRef.current);
       pendingCaptureRef.current = null;
     }
-  }, [isPlaying, captureFrame]);
+  }, [playback.isPlaying, frameCache]);
 
-  // Seek to a specific time (used by bar in seek mode)
+  // Seek to a specific time
   const handleSeek = (time: number) => {
-    const video = videoRef.current;
-    if (video) {
-      video.currentTime = time;
-      setCurrentTime(time);
-      prevTimeRef.current = time;
-    }
+    playback.seekTo(time);
   };
 
-  // Quick duration preset - adds a trim with specified duration at current position
-  const handleQuickDuration = (seconds: number) => {
-    const start = currentTime;
-    const end = Math.min(start + seconds, duration);
+  // Handle trim update from TrimBar
+  const handleTrimUpdate = useCallback((id: number, start: number, end: number) => {
+    trimManager.updateTrim(id, start, end, playback.seekTo);
+  }, [trimManager, playback]);
 
-    const newTrim: Trim = {
-      id: nextTrimId,
-      startTime: start,
-      endTime: end,
-      colorIndex: trims.length % TRIM_COLORS.length,
-    };
-
-    setTrims(prev => [...prev, newTrim]);
-    setNextTrimId(prev => prev + 1);
-    setPresetsOpen(false);
-  };
-
-  const goToStart = useCallback(() => {
-    const video = videoRef.current;
-    if (video) {
-      video.currentTime = 0;
-      setCurrentTime(0);
-      prevTimeRef.current = 0;
-    }
-  }, []);
-
-  const stepFrame = useCallback((direction: 'forward' | 'backward') => {
-    const video = videoRef.current;
-    if (!video || isPlaying) return;
-
-    // Approximate frame duration (assuming ~30fps)
-    const frameTime = 1 / 30;
-    const newTime = direction === 'forward'
-      ? Math.min(video.currentTime + frameTime, duration)
-      : Math.max(video.currentTime - frameTime, 0);
-
-    video.currentTime = newTime;
-    setCurrentTime(newTime);
-    prevTimeRef.current = newTime;
-  }, [isPlaying, duration]);
-
-  // Keyboard shortcuts
-  useEffect(() => {
-    if (!open) return;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if typing in an input
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
-
-      switch (e.code) {
-        case "Space":
-          e.preventDefault();
-          togglePlay();
-          break;
-        case "ArrowLeft":
-          e.preventDefault();
-          stepFrame("backward");
-          break;
-        case "ArrowRight":
-          e.preventDefault();
-          stepFrame("forward");
-          break;
-        case "ArrowUp":
-          e.preventDefault();
-          goToStart();
-          break;
-        // Mode shortcuts - clear selection on any mode change
-        case "Digit1":
-        case "KeyS":
-          e.preventDefault();
-          setBarMode('select');
-          setPendingTrimStart(null);
-          setPendingTrimEnd(null);
-          setLoopZone(null);
-          break;
-        case "Digit2":
-        case "KeyT":
-          e.preventDefault();
-          setBarMode('trim');
-          setPendingTrimStart(null);
-          setPendingTrimEnd(null);
-          setLoopZone(null);
-          break;
-        case "Digit3":
-        case "KeyM":
-          e.preventDefault();
-          setBarMode('marker');
-          setPendingTrimStart(null);
-          setPendingTrimEnd(null);
-          setLoopZone(null);
-          break;
-        // Toggle trims visibility (moved from T to V)
-        case "KeyV":
-          e.preventDefault();
-          setTrimsVisible(prev => !prev);
-          break;
-        // Escape clears pending trim and loop zone
-        case "Escape":
-          if (pendingTrimStart !== null || pendingTrimEnd !== null || loopZone !== null) {
-            e.preventDefault();
-            setPendingTrimStart(null);
-            setPendingTrimEnd(null);
-            setLoopZone(null);
-          }
-          break;
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, togglePlay, stepFrame, goToStart, pendingTrimStart, pendingTrimEnd, loopZone]);
+  // Volume change handler
+  const handleVolumeChange = useCallback((newVolume: number) => {
+    playback.setVolume(newVolume);
+    if (newVolume > 0 && playback.isMuted) playback.setIsMuted(false);
+    if (newVolume === 0) playback.setIsMuted(true);
+  }, [playback]);
 
   // Open universal export panel
   const handleContinue = () => {
@@ -816,14 +284,12 @@ export function TrimModal({
       videoRef.current.pause();
     }
 
-    // Build ranges from trims (or full video if no trims)
-    const ranges = trims.length > 0
-      ? trims.map(t => ({ startTime: t.startTime, endTime: t.endTime }))
+    const ranges = persistence.trims.length > 0
+      ? persistence.trims.map(t => ({ startTime: t.startTime, endTime: t.endTime }))
       : [{ startTime: 0, endTime: duration }];
 
     const totalDuration = ranges.reduce((sum, r) => sum + (r.endTime - r.startTime), 0);
 
-    // Open the universal export panel via context
     openPanel({
       id: crypto.randomUUID(),
       sourcePath: filePath,
@@ -831,7 +297,7 @@ export function TrimModal({
       sourceSize: fileSize,
       ranges,
       duration: totalDuration,
-      markers: markers,  // Pass markers for MKV chapter export
+      markers: persistence.markers,
     });
 
     onExportStarted?.();
@@ -848,700 +314,250 @@ export function TrimModal({
     <Modal open={open} onOpenChange={onOpenChange} fullScreen>
       <TooltipProvider delayDuration={300}>
         <div className="flex flex-col h-full">
-        {/* Header */}
-        <div className="p-4 border-b">
-          <ModalHeader onClose={handleCancel}>
-            <ModalTitle>Trim Video</ModalTitle>
-          </ModalHeader>
-        </div>
+          {/* Header */}
+          <div className="p-4 border-b">
+            <ModalHeader onClose={handleCancel}>
+              <ModalTitle>Trim Video</ModalTitle>
+            </ModalHeader>
+          </div>
 
-        {/* Video Preview + Sidebar - fills available space */}
-        <div className="flex-1 flex min-h-0 overflow-hidden">
-          {/* Video area */}
-          <div className="flex-1 bg-black flex items-center justify-center overflow-hidden relative">
-            <div className="relative max-w-full max-h-full">
-              <video
-                ref={videoRef}
-                src={videoSrc}
-                crossOrigin="anonymous"
-                className="max-w-full max-h-full object-contain block"
-                playsInline
-                muted={isMuted}
-                preload="metadata"
-                onLoadedMetadata={handleLoadedMetadata}
-                onTimeUpdate={handleTimeUpdate}
-                onSeeked={handleSeeked}
-                onEnded={() => {
-                  // Loop back to start of video
-                  if (videoRef.current) {
-                    videoRef.current.currentTime = 0;
-                    prevTimeRef.current = 0;
-                    videoRef.current.play().catch(() => {
-                      // Ignore AbortError
-                    });
-                  }
-                }}
-              />
-
-              {/* Cached frame overlay - shows instantly when scrubbing cached areas */}
-              {cachedFrame && (
-                <img
-                  src={cachedFrame}
-                  alt=""
-                  className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+          {/* Video Preview + Sidebar */}
+          <div className="flex-1 flex min-h-0 overflow-hidden">
+            {/* Video area */}
+            <div className="flex-1 bg-black flex items-center justify-center overflow-hidden relative">
+              <div className="relative max-w-full max-h-full">
+                <video
+                  ref={videoRef}
+                  src={videoSrc}
+                  crossOrigin="anonymous"
+                  className="max-w-full max-h-full object-contain block"
+                  playsInline
+                  muted={playback.isMuted}
+                  preload="metadata"
+                  onLoadedMetadata={handleLoadedMetadata}
+                  onTimeUpdate={handleTimeUpdate}
+                  onSeeked={handleSeeked}
+                  onEnded={() => {
+                    if (videoRef.current) {
+                      videoRef.current.currentTime = 0;
+                      playback.prevTimeRef.current = 0;
+                      videoRef.current.play().catch(() => {});
+                    }
+                  }}
                 />
-              )}
-            </div>
 
-            {/* Play/Pause button overlay */}
-            <button
-              onClick={togglePlay}
-              className="absolute inset-0 flex items-center justify-center group"
-            >
-              <div className="w-20 h-20 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                {isPlaying ? (
-                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 16 16" className="text-white" fill="currentColor">
-                    <path d="M5,1H2C1.4,1,1,1.4,1,2v12c0,0.6,0.4,1,1,1h3c0.6,0,1-0.4,1-1V2C6,1.4,5.6,1,5,1z"/>
-                    <path d="M14,1h-3c-0.6,0-1,0.4-1,1v12c0,0.6,0.4,1,1,1h3c0.6,0,1-0.4,1-1V2C15,1.4,14.6,1,14,1z"/>
-                  </svg>
-                ) : (
-                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 16 16" className="text-white ml-1" fill="currentColor">
-                    <path d="M14,7.999c0-0.326-0.159-0.632-0.427-0.819l-10-7C3.269-0.034,2.869-0.058,2.538,0.112 C2.207,0.285,2,0.626,2,0.999v14.001c0,0.373,0.207,0.715,0.538,0.887c0.331,0.17,0.73,0.146,1.035-0.068l10-7 C13.841,8.633,14,8.327,14,8.001C14,8,14,8,14,7.999C14,8,14,8,14,7.999z"/>
-                  </svg>
+                {/* Cached frame overlay */}
+                {cachedFrame && (
+                  <img
+                    src={cachedFrame}
+                    alt=""
+                    className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                  />
                 )}
               </div>
-            </button>
-          </div>
 
-          {/* Sidebar */}
-          <div className="w-[280px] border-l bg-background flex flex-col">
-            {/* Tab switcher */}
-            <div className="p-2">
-              <ButtonGroup className="w-full">
-                <Button
-                  variant="subtle"
-                  size="sm"
-                  onClick={() => setSidebarTab('trims')}
-                  className={`flex-1 ${sidebarTab === 'trims' ? 'bg-muted text-foreground' : ''}`}
-                >
-                  Trims
-                </Button>
-                <Button
-                  variant="subtle"
-                  size="sm"
-                  onClick={() => setSidebarTab('markers')}
-                  className={`flex-1 ${sidebarTab === 'markers' ? 'bg-muted text-foreground' : ''}`}
-                >
-                  Markers
-                </Button>
-              </ButtonGroup>
-            </div>
-
-            {/* Action bar */}
-            <div className="px-2 pt-1.5 pb-3 border-b flex items-center gap-2">
-              <Button
-                variant="subtle"
-                size="sm"
-                className="flex-1"
-                onClick={sidebarTab === 'trims' ? addTrim : addMarkerAtPlayhead}
-                disabled={loading}
+              {/* Play/Pause button overlay */}
+              <button
+                onClick={playback.togglePlay}
+                className="absolute inset-0 flex items-center justify-center group"
               >
-                <Plus className="h-4 w-4 mr-1" />
-                {sidebarTab === 'trims' ? 'Trim' : 'Marker'}
-              </Button>
-              {sidebarTab === 'trims' && (
-                <>
-                  <div className="relative flex-1">
-                    <Button
-                      variant="subtle"
-                      size="sm"
-                      className="w-full"
-                      onClick={() => setPresetsOpen(!presetsOpen)}
-                      disabled={loading}
-                    >
-                      <Plus className="h-4 w-4 mr-1" />
-                      Preset
-                    </Button>
-                    {presetsOpen && (
-                      <>
-                        <div
-                          className="fixed inset-0 z-40"
-                          onClick={() => setPresetsOpen(false)}
-                        />
-                        <div className="absolute top-full left-0 mt-1 bg-background border rounded-md shadow-lg z-50 py-1 min-w-full">
-                          {QUICK_DURATIONS.map((sec) => (
-                            <button
-                              key={sec}
-                              onClick={() => handleQuickDuration(sec)}
-                              disabled={duration < sec}
-                              className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                              {sec}s
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                  <div className="relative flex-1">
-                    <Button
-                      variant="subtle"
-                      size="sm"
-                      className="w-full"
-                      onClick={() => !isDetectingScenes && setAutoDetectOpen(!autoDetectOpen)}
-                      disabled={loading || isDetectingScenes}
-                    >
-                      {isDetectingScenes ? (
-                        <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                      ) : (
-                        <Wand2 className="h-4 w-4 mr-1" />
-                      )}
-                      Auto
-                    </Button>
-                    {autoDetectOpen && (
-                      <>
-                        <div
-                          className="fixed inset-0 z-40"
-                          onClick={() => setAutoDetectOpen(false)}
-                        />
-                        <div className="absolute top-full right-0 mt-1 bg-background border rounded-md shadow-lg z-50 py-1 min-w-[140px]">
-                          <div className="px-3 py-1.5 text-xs text-muted-foreground font-medium">
-                            Detection strength
-                          </div>
-                          <button
-                            onClick={() => handleAutoDetect(0.5)}
-                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted whitespace-nowrap"
-                          >
-                            Low
-                          </button>
-                          <button
-                            onClick={() => handleAutoDetect(0.3)}
-                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted whitespace-nowrap"
-                          >
-                            Medium
-                          </button>
-                          <button
-                            onClick={() => handleAutoDetect(0.2)}
-                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted whitespace-nowrap"
-                          >
-                            High
-                          </button>
-                          <button
-                            onClick={() => handleAutoDetect(0.1)}
-                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted whitespace-nowrap"
-                          >
-                            Very High
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </>
-              )}
+                <div className="w-20 h-20 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                  {playback.isPlaying ? (
+                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 16 16" className="text-white" fill="currentColor">
+                      <path d="M5,1H2C1.4,1,1,1.4,1,2v12c0,0.6,0.4,1,1,1h3c0.6,0,1-0.4,1-1V2C6,1.4,5.6,1,5,1z"/>
+                      <path d="M14,1h-3c-0.6,0-1,0.4-1,1v12c0,0.6,0.4,1,1,1h3c0.6,0,1-0.4,1-1V2C15,1.4,14.6,1,14,1z"/>
+                    </svg>
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 16 16" className="text-white ml-1" fill="currentColor">
+                      <path d="M14,7.999c0-0.326-0.159-0.632-0.427-0.819l-10-7C3.269-0.034,2.869-0.058,2.538,0.112 C2.207,0.285,2,0.626,2,0.999v14.001c0,0.373,0.207,0.715,0.538,0.887c0.331,0.17,0.73,0.146,1.035-0.068l10-7 C13.841,8.633,14,8.327,14,8.001C14,8,14,8,14,7.999C14,8,14,8,14,7.999z"/>
+                    </svg>
+                  )}
+                </div>
+              </button>
             </div>
 
-            {/* Tab content */}
-            <div className="flex-1 overflow-y-auto p-2 space-y-1">
-              {sidebarTab === 'trims' ? (
-                trims.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground text-sm px-4">
-                    <p>No trims yet</p>
-                    <p className="text-xs mt-1">Click + to add a trim</p>
-                  </div>
-                ) : (
-                  trims.map((trim, index) => {
-                    const color = TRIM_COLORS[trim.colorIndex];
-                    const trimDuration = trim.endTime - trim.startTime;
-                    return (
-                      <div
-                        key={trim.id}
-                        className="flex rounded bg-muted/50 hover:bg-muted transition-colors overflow-hidden cursor-pointer"
-                        onClick={() => handleSeek(trim.startTime)}
-                      >
-                        {/* Color bar */}
-                        <div className={`w-1 ${color.dot}`} />
-                        {/* Content */}
-                        <div className="flex-1 p-2">
-                          {/* Row 1: Name and delete */}
-                          <div className="flex items-center justify-between">
-                            {editingTrimId === trim.id ? (
-                              <input
-                                type="text"
-                                value={editingName}
-                                onChange={(e) => setEditingName(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
-                                    saveEditingTrimName();
-                                  } else if (e.key === 'Escape') {
-                                    setEditingTrimId(null);
-                                    setEditingName('');
-                                  }
-                                }}
-                                onBlur={saveEditingTrimName}
-                                onFocus={(e) => e.target.select()}
-                                autoFocus
-                                className={`text-sm font-medium ${color.text} bg-transparent outline-none w-full mr-2`}
-                              />
-                            ) : (
-                              <span
-                                className={`text-sm font-medium ${color.text} cursor-text`}
-                                onClick={(e) => { e.stopPropagation(); startEditingTrimName(trim, index); }}
-                              >
-                                {trim.name || `Trim ${index + 1}`}
-                              </span>
-                            )}
-                            <button
-                              onClick={(e) => { e.stopPropagation(); deleteTrim(trim.id); }}
-                              className="text-muted-foreground hover:text-red-400 transition-colors flex-shrink-0"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                          {/* Row 2: Times */}
-                          <div className="flex items-center justify-between text-xs text-muted-foreground mt-1">
-                            <span>
-                              {formatDuration(trim.startTime)} -&gt; {formatDuration(trim.endTime)}
-                            </span>
-                            <span>{formatDuration(trimDuration)}</span>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })
-                )
-              ) : (
-                markers.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground text-sm px-4">
-                    <p>No markers yet</p>
-                    <p className="text-xs mt-1">Click + to add a marker</p>
-                  </div>
-                ) : (
-                  markers.map((marker, index) => {
-                    const isSelected = selectedMarkerId === marker.id;
-                    return (
-                      <div
-                        key={marker.id}
-                        className={`flex rounded bg-muted/50 hover:bg-muted transition-colors overflow-hidden cursor-pointer ${isSelected ? 'ring-1 ring-red-400' : ''}`}
-                        onClick={() => {
-                          handleSeek(marker.time);
-                          setSelectedMarkerId(marker.id);
-                        }}
-                      >
-                        {/* Red color bar (always red) */}
-                        <div className="w-1 bg-red-400" />
-                        {/* Content */}
-                        <div className="flex-1 p-2">
-                          {/* Row 1: Name and delete */}
-                          <div className="flex items-center justify-between">
-                            {editingMarkerId === marker.id ? (
-                              <input
-                                type="text"
-                                value={editingMarkerName}
-                                onChange={(e) => setEditingMarkerName(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') saveEditingMarkerName();
-                                  if (e.key === 'Escape') { setEditingMarkerId(null); setEditingMarkerName(''); }
-                                }}
-                                onBlur={saveEditingMarkerName}
-                                onFocus={(e) => e.target.select()}
-                                autoFocus
-                                className="text-sm font-medium text-red-400 bg-transparent outline-none w-full mr-2"
-                              />
-                            ) : (
-                              <span
-                                className="text-sm font-medium text-red-400 cursor-text"
-                                onClick={(e) => { e.stopPropagation(); startEditingMarkerName(marker, index); }}
-                              >
-                                {marker.name || `Chapter ${index + 1}`}
-                              </span>
-                            )}
-                            <button
-                              onClick={(e) => { e.stopPropagation(); deleteMarker(marker.id); }}
-                              className="text-muted-foreground hover:text-red-400 transition-colors flex-shrink-0"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                          {/* Row 2: Timestamp */}
-                          <div className="text-xs text-muted-foreground mt-1">
-                            {formatDuration(marker.time)}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })
-                )
-              )}
-            </div>
-
-            {/* Bottom bar */}
-            <div className="px-2 py-2 border-t flex gap-2">
-              {sidebarTab === 'trims' ? (
-                <Button
-                  variant="subtle"
-                  size="sm"
-                  onClick={() => setTrimsVisible(!trimsVisible)}
-                  disabled={trims.length === 0}
-                  className="flex-1"
-                >
-                  {trimsVisible ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />}
-                  {trimsVisible ? "Hide trims" : "Show trims"}
-                </Button>
-              ) : (
-                <Button
-                  variant="subtle"
-                  size="sm"
-                  onClick={() => setMarkersVisible(!markersVisible)}
-                  disabled={markers.length === 0}
-                  className="flex-1"
-                >
-                  {markersVisible ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />}
-                  {markersVisible ? "Hide markers" : "Show markers"}
-                </Button>
-              )}
-              <Button
-                variant="subtle"
-                size="sm"
-                className="flex-1 hover:bg-red-500/20 hover:text-red-400"
-                onClick={() => {
-                  if (sidebarTab === 'trims') {
-                    setTrims([]);
-                  } else {
-                    setMarkers([]);
-                    setSelectedMarkerId(null);
-                  }
-                }}
-                disabled={sidebarTab === 'trims' ? trims.length === 0 : markers.length === 0}
-              >
-                <Trash2 className="h-4 w-4 mr-1" />
-                Clear all
-              </Button>
-            </div>
-          </div>
-        </div>
-
-        {/* Controls */}
-        <div className="p-4 border-t space-y-4">
-          {/* Time display */}
-          <div className="flex items-center justify-between text-sm">
-            {/* Mode selector and markers */}
-            <div className="flex items-center gap-4">
-              {/* Mode selector */}
-              <ButtonGroup>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="subtle"
-                      size="sm"
-                      onClick={() => { setBarMode('select'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
-                      className={barMode === 'select' ? 'bg-blue-500/20 text-blue-400' : ''}
-                    >
-                      <MousePointer className="h-4 w-4 mr-1" />
-                      Select
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    <p>Click/drag to select <kbd className="ml-1 px-1 py-0.5 bg-zinc-700 rounded text-[10px]">1</kbd> <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-[10px]">S</kbd></p>
-                  </TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="subtle"
-                      size="sm"
-                      onClick={() => { setBarMode('trim'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
-                      className={barMode === 'trim' ? 'bg-yellow-500/20 text-yellow-400' : ''}
-                    >
-                      <Scissors className="h-4 w-4 mr-1" />
-                      Trim
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    <p>Click/drag to create trims <kbd className="ml-1 px-1 py-0.5 bg-zinc-700 rounded text-[10px]">2</kbd> <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-[10px]">T</kbd></p>
-                  </TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="subtle"
-                      size="sm"
-                      onClick={() => { setBarMode('marker'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
-                      className={barMode === 'marker' ? 'bg-red-500/20 text-red-400' : ''}
-                    >
-                      <SquareSplitHorizontal className="h-4 w-4 mr-1" />
-                      Marker
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    <p>Click to add markers <kbd className="ml-1 px-1 py-0.5 bg-zinc-700 rounded text-[10px]">3</kbd> <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-[10px]">M</kbd></p>
-                  </TooltipContent>
-                </Tooltip>
-              </ButtonGroup>
-            </div>
-
-            {/* Playhead / Total duration - click to toggle elapsed/remaining */}
-            <button
-              onClick={() => setShowRemaining(!showRemaining)}
-              className="flex items-center gap-2 hover:bg-muted/50 px-2 py-1 -my-1 rounded transition-colors"
-            >
-              <span className="text-foreground tabular-nums">
-                {showRemaining ? `-${formatDuration(duration - currentTime)}` : formatDuration(currentTime)}
-              </span>
-              <span className="text-muted-foreground">/</span>
-              <span className="text-muted-foreground tabular-nums">{formatDuration(duration)}</span>
-            </button>
-          </div>
-
-          {/* Trim bar */}
-          {duration > 0 ? (
-            <TrimBar
+            {/* Sidebar */}
+            <TrimSidebar
+              trims={persistence.trims}
+              markers={persistence.markers}
               duration={duration}
-              trims={trims}
+              loading={persistence.loading}
+              selectedMarkerId={markerManager.selectedMarkerId}
               trimsVisible={trimsVisible}
               markersVisible={markersVisible}
-              onTrimUpdate={updateTrim}
-              onHover={handleHover}
-              markers={markers}
-              selectedMarkerId={selectedMarkerId}
-              filmstrip={filmstrip}
-              currentTime={currentTime}
-              colors={TRIM_COLORS}
-              mode={barMode}
-              pendingTrimStart={pendingTrimStart}
-              pendingTrimEnd={pendingTrimEnd}
+              isDetectingScenes={trimManager.isDetectingScenes}
+              onAddTrim={trimManager.addTrim}
+              onAddMarker={markerManager.addMarkerAtPlayhead}
+              onDeleteTrim={trimManager.deleteTrim}
+              onDeleteMarker={markerManager.deleteMarker}
+              onUpdateTrimName={trimManager.updateTrimName}
+              onUpdateMarkerName={markerManager.updateMarkerName}
               onSeek={handleSeek}
-              onTrimCreate={createTrim}
-              onMarkerAdd={addMarker}
-              onPendingTrimChange={setPendingTrimStart}
-              onPendingTrimEndChange={setPendingTrimEnd}
-              loopZone={loopZone}
-              onLoopZoneChange={setLoopZone}
-              playheadLocked={playheadLocked}
-              onPlayheadLockChange={setPlayheadLocked}
-              cachedTimes={cachedTimes}
+              onSelectMarker={markerManager.setSelectedMarkerId}
+              onToggleTrimsVisible={() => setTrimsVisible(prev => !prev)}
+              onToggleMarkersVisible={() => setMarkersVisible(prev => !prev)}
+              onClearAllTrims={() => persistence.setTrims([])}
+              onClearAllMarkers={() => {
+                persistence.setMarkers([]);
+                markerManager.setSelectedMarkerId(null);
+              }}
+              onQuickDuration={trimManager.addTrimWithDuration}
+              onAutoDetect={trimManager.detectScenes}
             />
-          ) : (
-            <div className="h-16 bg-muted rounded-lg flex items-center justify-center text-sm text-muted-foreground">
-              {loading ? "Loading..." : "Could not load video"}
-            </div>
-          )}
+          </div>
 
-          {/* Playback controls and actions */}
-          <div className="flex items-center justify-between">
-            {/* Left side: playback controls + presets */}
-            <div className="flex items-center gap-2">
-              {/* Restart */}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="subtle"
-                    size="icon"
-                    onClick={goToStart}
-                    disabled={loading}
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                      <path d="M10,1H3A1,1,0,0,0,3,3h7a3,3,0,0,1,0,6H4.414L6.707,6.707A1,1,0,0,0,5.293,5.293l-4,4a1,1,0,0,0,0,1.414l4,4a1,1,0,1,0,1.414-1.414L4.414,11H10A5,5,0,0,0,10,1Z"/>
-                    </svg>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top">
-                  <p>Restart <kbd className="ml-1 px-1 py-0.5 bg-zinc-700 rounded text-[10px]">↑</kbd></p>
-                </TooltipContent>
-              </Tooltip>
-
-              <ButtonGroup>
-                {/* Step backward */}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="subtle"
-                      size="icon"
-                      onClick={() => stepFrame('backward')}
-                      disabled={loading || isPlaying}
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
-                        <path d="M4,8.001C4,8.327,4.159,8.633,4.427,8.82l10,7c0.305,0.214,0.704,0.238,1.035,0.068 C15.793,15.715,16,15.374,16,15.001V0.999c0-0.373-0.207-0.715-0.538-0.887c-0.331-0.17-0.73-0.146-1.035,0.068l-10,7 C4.159,7.367,4,7.673,4,7.999C4,8,4,8,4,8.001C4,8,4,8,4,8.001z"/>
-                        <path d="M1,0c0.552,0,1,0.447,1,1v14c0,0.553-0.448,1-1,1s-1-0.447-1-1L0,1C0,0.447,0.448,0,1,0z"/>
-                      </svg>
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    <p>Step back <kbd className="ml-1 px-1 py-0.5 bg-zinc-700 rounded text-[10px]">←</kbd></p>
-                  </TooltipContent>
-                </Tooltip>
-
-                {/* Play/Pause */}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="subtle"
-                      size="icon"
-                      onClick={togglePlay}
-                      disabled={loading}
-                    >
-                      {isPlaying ? (
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                          <path d="M5,1H2C1.4,1,1,1.4,1,2v12c0,0.6,0.4,1,1,1h3c0.6,0,1-0.4,1-1V2C6,1.4,5.6,1,5,1z"/>
-                          <path d="M14,1h-3c-0.6,0-1,0.4-1,1v12c0,0.6,0.4,1,1,1h3c0.6,0,1-0.4,1-1V2C15,1.4,14.6,1,14,1z"/>
-                        </svg>
-                      ) : (
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                          <path d="M14,7.999c0-0.326-0.159-0.632-0.427-0.819l-10-7C3.269-0.034,2.869-0.058,2.538,0.112 C2.207,0.285,2,0.626,2,0.999v14.001c0,0.373,0.207,0.715,0.538,0.887c0.331,0.17,0.73,0.146,1.035-0.068l10-7 C13.841,8.633,14,8.327,14,8.001C14,8,14,8,14,7.999C14,8,14,8,14,7.999z"/>
-                        </svg>
-                      )}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    <p>{isPlaying ? "Pause" : "Play"} <kbd className="ml-1 px-1 py-0.5 bg-zinc-700 rounded text-[10px]">Space</kbd></p>
-                  </TooltipContent>
-                </Tooltip>
-
-                {/* Step forward */}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="subtle"
-                      size="icon"
-                      onClick={() => stepFrame('forward')}
-                      disabled={loading || isPlaying}
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
-                        <path d="M12,7.999c0-0.326-0.159-0.632-0.427-0.819l-10-7C1.269-0.034,0.869-0.058,0.538,0.112 C0.207,0.285,0,0.626,0,0.999v14.001c0,0.373,0.207,0.715,0.538,0.887c0.331,0.17,0.73,0.146,1.035-0.068l10-7 C11.841,8.633,12,8.327,12,8.001C12,8,12,8,12,7.999C12,8,12,8,12,7.999z"/>
-                        <path d="M15,16c-0.552,0-1-0.447-1-1V1c0-0.553,0.448-1,1-1s1,0.447,1,1v14C16,15.553,15.552,16,15,16z"/>
-                      </svg>
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    <p>Step forward <kbd className="ml-1 px-1 py-0.5 bg-zinc-700 rounded text-[10px]">→</kbd></p>
-                  </TooltipContent>
-                </Tooltip>
-              </ButtonGroup>
-
-              {/* Add marker */}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="subtle"
-                    size="icon"
-                    onClick={addMarkerAtPlayhead}
-                    disabled={loading}
-                  >
-                    <SquareSplitHorizontal className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top">
-                  <p>{loopZone ? "Add markers at selection" : "Add marker at playhead"}</p>
-                </TooltipContent>
-              </Tooltip>
-
-              {/* Add trim at playhead */}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="subtle"
-                    size="icon"
-                    onClick={addTrim}
-                    disabled={loading}
-                  >
-                    <Scissors className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top">
-                  <p>{loopZone ? "Add trim from selection" : "Add trim at playhead"}</p>
-                </TooltipContent>
-              </Tooltip>
-
-              {/* Divider */}
-              <div className="h-5 w-px bg-border ml-2" />
-
-              {/* Volume controls */}
-              <div className="flex items-center gap-3 ml-2">
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="subtle"
-                      size="icon"
-                      onClick={() => setIsMuted(!isMuted)}
-                    >
-                      {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    <p>{isMuted ? "Unmute" : "Mute"}</p>
-                  </TooltipContent>
-                </Tooltip>
-                <div
-                  className="relative w-20 h-8 flex items-center group"
-                  onWheel={(e) => {
-                    e.preventDefault();
-                    const delta = e.deltaY > 0 ? -0.05 : 0.05;
-                    const newVolume = Math.max(0, Math.min(1, volume + delta));
-                    setVolume(newVolume);
-                    if (newVolume > 0 && isMuted) setIsMuted(false);
-                    if (newVolume === 0) setIsMuted(true);
-                  }}
-                >
-                  {/* Background track */}
-                  <div className="absolute left-0 w-full h-1 bg-white/20 rounded-full" />
-                  {/* Filled portion */}
-                  <div
-                    className="absolute left-0 h-1 bg-white rounded-full z-[1]"
-                    style={{ width: `${(isMuted ? 0 : volume) * 100}%` }}
-                  />
-                  {/* Input with transparent track */}
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.05"
-                    value={isMuted ? 0 : volume}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      setVolume(val);
-                      if (val > 0 && isMuted) setIsMuted(false);
-                      if (val === 0) setIsMuted(true);
-                    }}
-                    className="absolute w-full h-1 appearance-none bg-transparent cursor-pointer z-10
-                      [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-transparent
-                      [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:mt-[-4px] [&::-webkit-slider-thumb]:transition-shadow [&::-webkit-slider-thumb]:duration-150 [&::-webkit-slider-thumb]:shadow-[0_0_0_0px_rgba(255,255,255,0.2)]
-                      [&::-webkit-slider-thumb]:hover:shadow-[0_0_0_4px_rgba(255,255,255,0.2)]
-                      [&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-transparent
-                      [&::-moz-range-thumb]:appearance-none [&::-moz-range-thumb]:w-3 [&::-moz-range-thumb]:h-3 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-white [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:transition-shadow [&::-moz-range-thumb]:duration-150 [&::-moz-range-thumb]:shadow-[0_0_0_0px_rgba(255,255,255,0.2)]
-                      [&::-moz-range-thumb]:hover:shadow-[0_0_0_4px_rgba(255,255,255,0.2)]"
-                  />
-                </div>
+          {/* Controls */}
+          <div className="p-4 border-t space-y-4">
+            {/* Time display */}
+            <div className="flex items-center justify-between text-sm">
+              {/* Mode selector */}
+              <div className="flex items-center gap-4">
+                <ButtonGroup>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="subtle"
+                        size="sm"
+                        onClick={() => { setBarMode('select'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
+                        className={barMode === 'select' ? 'bg-blue-500/20 text-blue-400' : ''}
+                      >
+                        <MousePointer className="h-4 w-4 mr-1" />
+                        Select
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
+                      <p>Click/drag to select <kbd className="ml-1 px-1 py-0.5 bg-zinc-700 rounded text-[10px]">1</kbd> <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-[10px]">S</kbd></p>
+                    </TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="subtle"
+                        size="sm"
+                        onClick={() => { setBarMode('trim'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
+                        className={barMode === 'trim' ? 'bg-yellow-500/20 text-yellow-400' : ''}
+                      >
+                        <Scissors className="h-4 w-4 mr-1" />
+                        Trim
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
+                      <p>Click/drag to create trims <kbd className="ml-1 px-1 py-0.5 bg-zinc-700 rounded text-[10px]">2</kbd> <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-[10px]">T</kbd></p>
+                    </TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="subtle"
+                        size="sm"
+                        onClick={() => { setBarMode('marker'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
+                        className={barMode === 'marker' ? 'bg-red-500/20 text-red-400' : ''}
+                      >
+                        <SquareSplitHorizontal className="h-4 w-4 mr-1" />
+                        Marker
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
+                      <p>Click to add markers <kbd className="ml-1 px-1 py-0.5 bg-zinc-700 rounded text-[10px]">3</kbd> <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-[10px]">M</kbd></p>
+                    </TooltipContent>
+                  </Tooltip>
+                </ButtonGroup>
               </div>
 
+              {/* Playhead / Total duration */}
+              <button
+                onClick={() => setShowRemaining(!showRemaining)}
+                className="flex items-center gap-2 hover:bg-muted/50 px-2 py-1 -my-1 rounded transition-colors"
+              >
+                <span className="text-foreground tabular-nums">
+                  {showRemaining ? `-${formatDuration(duration - playback.currentTime)}` : formatDuration(playback.currentTime)}
+                </span>
+                <span className="text-muted-foreground">/</span>
+                <span className="text-muted-foreground tabular-nums">{formatDuration(duration)}</span>
+              </button>
             </div>
 
-            {/* Right side: cancel/confirm */}
-            <div className="flex gap-2">
-              <Button variant="outline" onClick={handleCancel}>
-                Cancel
-              </Button>
-              <Button onClick={handleContinue} disabled={!isValid || loading || isExporting}>
-                {isExporting ? (
-                  <>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" className="mr-2">
-                      <g fill="currentColor">
-                        <g className="nc-loop-dots-4-24-icon-f">
-                          <circle cx="4" cy="12" fill="currentColor" r="3"></circle>
-                          <circle cx="12" cy="12" fill="currentColor" r="3"></circle>
-                          <circle cx="20" cy="12" fill="currentColor" r="3"></circle>
+            {/* Trim bar */}
+            {duration > 0 ? (
+              <TrimBar
+                duration={duration}
+                trims={persistence.trims}
+                trimsVisible={trimsVisible}
+                markersVisible={markersVisible}
+                onTrimUpdate={handleTrimUpdate}
+                onHover={handleHover}
+                markers={persistence.markers}
+                selectedMarkerId={markerManager.selectedMarkerId}
+                filmstrip={filmstrip}
+                currentTime={playback.currentTime}
+                colors={TRIM_COLORS}
+                mode={barMode}
+                pendingTrimStart={pendingTrimStart}
+                pendingTrimEnd={pendingTrimEnd}
+                onSeek={handleSeek}
+                onTrimCreate={trimManager.createTrim}
+                onMarkerAdd={markerManager.addMarker}
+                onPendingTrimChange={setPendingTrimStart}
+                onPendingTrimEndChange={setPendingTrimEnd}
+                loopZone={loopZone}
+                onLoopZoneChange={setLoopZone}
+                playheadLocked={playheadLocked}
+                onPlayheadLockChange={setPlayheadLocked}
+                cachedTimes={frameCache.cachedTimes}
+              />
+            ) : (
+              <div className="h-16 bg-muted rounded-lg flex items-center justify-center text-sm text-muted-foreground">
+                {persistence.loading ? "Loading..." : "Could not load video"}
+              </div>
+            )}
+
+            {/* Playback controls and actions */}
+            <div className="flex items-center justify-between">
+              {/* Left side: playback controls */}
+              <PlaybackControls
+                isPlaying={playback.isPlaying}
+                loading={persistence.loading}
+                isMuted={playback.isMuted}
+                volume={playback.volume}
+                loopZone={loopZone}
+                onGoToStart={playback.goToStart}
+                onStepBackward={() => playback.stepFrame('backward')}
+                onStepForward={() => playback.stepFrame('forward')}
+                onTogglePlay={playback.togglePlay}
+                onAddMarker={markerManager.addMarkerAtPlayhead}
+                onAddTrim={trimManager.addTrim}
+                onToggleMute={() => playback.setIsMuted(!playback.isMuted)}
+                onVolumeChange={handleVolumeChange}
+              />
+
+              {/* Right side: cancel/confirm */}
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={handleCancel}>
+                  Cancel
+                </Button>
+                <Button onClick={handleContinue} disabled={!isValid || persistence.loading || isExporting}>
+                  {isExporting ? (
+                    <>
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" className="mr-2">
+                        <g fill="currentColor">
+                          <g className="nc-loop-dots-4-24-icon-f">
+                            <circle cx="4" cy="12" fill="currentColor" r="3"></circle>
+                            <circle cx="12" cy="12" fill="currentColor" r="3"></circle>
+                            <circle cx="20" cy="12" fill="currentColor" r="3"></circle>
+                          </g>
+                          <style>{`.nc-loop-dots-4-24-icon-f{--animation-duration:0.8s}.nc-loop-dots-4-24-icon-f *{opacity:.4;transform:scale(.75);animation:nc-loop-dots-4-anim var(--animation-duration) infinite}.nc-loop-dots-4-24-icon-f :nth-child(1){transform-origin:4px 12px;animation-delay:-.3s;animation-delay:calc(var(--animation-duration)/-2.666)}.nc-loop-dots-4-24-icon-f :nth-child(2){transform-origin:12px 12px;animation-delay:-.15s;animation-delay:calc(var(--animation-duration)/-5.333)}.nc-loop-dots-4-24-icon-f :nth-child(3){transform-origin:20px 12px}@keyframes nc-loop-dots-4-anim{0%,100%{opacity:.4;transform:scale(.75)}50%{opacity:1;transform:scale(1)}}`}</style>
                         </g>
-                        <style>{`.nc-loop-dots-4-24-icon-f{--animation-duration:0.8s}.nc-loop-dots-4-24-icon-f *{opacity:.4;transform:scale(.75);animation:nc-loop-dots-4-anim var(--animation-duration) infinite}.nc-loop-dots-4-24-icon-f :nth-child(1){transform-origin:4px 12px;animation-delay:-.3s;animation-delay:calc(var(--animation-duration)/-2.666)}.nc-loop-dots-4-24-icon-f :nth-child(2){transform-origin:12px 12px;animation-delay:-.15s;animation-delay:calc(var(--animation-duration)/-5.333)}.nc-loop-dots-4-24-icon-f :nth-child(3){transform-origin:20px 12px}@keyframes nc-loop-dots-4-anim{0%,100%{opacity:.4;transform:scale(.75)}50%{opacity:1;transform:scale(1)}}`}</style>
-                      </g>
-                    </svg>
-                    Exporting
-                  </>
-                ) : (
-                  "Export"
-                )}
-              </Button>
+                      </svg>
+                      Exporting
+                    </>
+                  ) : (
+                    "Export"
+                  )}
+                </Button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
       </TooltipProvider>
     </Modal>
   );
