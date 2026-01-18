@@ -85,6 +85,55 @@ async fn extract_filmstrip(app: tauri::AppHandle, path: String, duration: f64, c
 }
 
 #[tauri::command]
+async fn detect_scenes(app: tauri::AppHandle, path: String, threshold: Option<f64>) -> Result<Vec<f64>, String> {
+    let ffmpeg = get_ffmpeg_path(&app);
+    let threshold = threshold.unwrap_or(0.3);
+
+    // Build the scene detection filter
+    let filter = format!("select='gt(scene,{})',showinfo", threshold);
+
+    let mut cmd = tokio::process::Command::new(&ffmpeg);
+    cmd.args([
+        "-i", &path,
+        "-vf", &filter,
+        "-f", "null",
+        "-"
+    ]);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let output = cmd.output().await.map_err(|e| format!("Failed to run ffmpeg: {}", e))?;
+
+    // Parse stderr for pts_time values from showinfo output
+    // Lines look like: [Parsed_showinfo_1 @ 0x...] n:   0 pts:  12012 pts_time:0.500417 ...
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut timestamps: Vec<f64> = Vec::new();
+
+    for line in stderr.lines() {
+        if line.contains("pts_time:") {
+            // Extract pts_time value
+            if let Some(pts_start) = line.find("pts_time:") {
+                let after_pts = &line[pts_start + 9..];
+                // Find the end of the number (space or end of string)
+                let end = after_pts.find(|c: char| c.is_whitespace()).unwrap_or(after_pts.len());
+                if let Ok(time) = after_pts[..end].parse::<f64>() {
+                    // Skip times very close to 0 (first frame is often detected)
+                    if time > 0.1 {
+                        timestamps.push(time);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(timestamps)
+}
+
+#[tauri::command]
 async fn convert_file(
     app: tauri::AppHandle,
     id: String,
@@ -102,7 +151,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_file_size, get_video_duration, extract_frame, extract_filmstrip, convert_file])
+        .invoke_handler(tauri::generate_handler![get_file_size, get_video_duration, extract_frame, extract_filmstrip, detect_scenes, convert_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

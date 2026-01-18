@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { SquareSplitHorizontal, Plus, X, MousePointer, Scissors, Trash2, Eye, EyeOff, Volume2, VolumeX } from "lucide-react";
+import { SquareSplitHorizontal, Plus, X, MousePointer, Scissors, Trash2, Eye, EyeOff, Volume2, VolumeX, Wand2, Loader2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
@@ -57,6 +57,7 @@ export function TrimModal({
   const videoRef = useRef<HTMLVideoElement>(null);
   const prevTimeRef = useRef(0);
   const animationFrameRef = useRef<number | null>(null);
+  const loadedFileRef = useRef<string | null>(null); // Track which file's data is loaded
   const frameCacheRef = useRef<Map<number, string>>(new Map());
   const pendingCaptureRef = useRef<number | null>(null);
   const capturingRef = useRef<Set<number>>(new Set()); // Track in-progress captures
@@ -87,6 +88,8 @@ export function TrimModal({
   const [cachedTimes, setCachedTimes] = useState<number[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(0.7);
+  const [isDetectingScenes, setIsDetectingScenes] = useState(false);
+  const [autoDetectOpen, setAutoDetectOpen] = useState(false);
 
   const isValid = trims.length > 0;
   const videoSrc = convertFileSrc(filePath);
@@ -202,11 +205,21 @@ export function TrimModal({
   useEffect(() => {
     if (!open) return;
 
+    // Clear loaded file ref to prevent saving old data to new file
+    loadedFileRef.current = null;
+
     setLoading(true);
     setFilmstrip([]);
+    setTrims([]);
+    setNextTrimId(1);
+    setLockedTimes([]);
     setTrimsVisible(true);
     setIsPlaying(false);
     setCurrentTime(0);
+    prevTimeRef.current = 0;
+    if (videoRef.current) {
+      videoRef.current.currentTime = 0;
+    }
     setBarMode('select');
     setPendingTrimStart(null);
     setPendingTrimEnd(null);
@@ -243,11 +256,15 @@ export function TrimModal({
         setTrims(savedTrims ?? []);
         setNextTrimId(savedNextId ?? (savedTrims?.length ?? 0) + 1);
         setLockedTimes(savedMarkers ?? []);
+
+        // Mark this file as loaded - enables saving
+        loadedFileRef.current = filePath;
       } catch (e) {
         console.error("Failed to load data:", e);
         setTrims([]);
         setNextTrimId(1);
         setLockedTimes([]);
+        loadedFileRef.current = filePath; // Still enable saving even on error
       } finally {
         setLoading(false);
       }
@@ -258,7 +275,8 @@ export function TrimModal({
 
   // Save trims when they change
   useEffect(() => {
-    if (!open || loading) return;
+    // Only save if this file's data has been loaded (prevents saving old data to new file)
+    if (!open || loading || loadedFileRef.current !== filePath) return;
 
     const saveTrims = async () => {
       try {
@@ -277,7 +295,8 @@ export function TrimModal({
 
   // Save markers when they change
   useEffect(() => {
-    if (!open || loading) return;
+    // Only save if this file's data has been loaded (prevents saving old data to new file)
+    if (!open || loading || loadedFileRef.current !== filePath) return;
 
     const saveMarkers = async () => {
       try {
@@ -449,6 +468,48 @@ export function TrimModal({
     setTrims(prev => [...prev, newTrim]);
     setNextTrimId(prev => prev + 1);
   }, [nextTrimId, trims.length, duration]);
+
+  // Auto-detect scenes and create trims at cut points
+  const handleAutoDetect = useCallback(async (threshold: number) => {
+    if (isDetectingScenes || !filePath) return;
+
+    setAutoDetectOpen(false);
+    setIsDetectingScenes(true);
+    try {
+      const timestamps = await invoke<number[]>("detect_scenes", {
+        path: filePath,
+        threshold,
+      });
+
+      // Create boundaries: 0 + detected cuts + duration
+      const points = [0, ...timestamps, duration].sort((a, b) => a - b);
+
+      // Create trims between consecutive points
+      const newTrims: Trim[] = [];
+      for (let i = 0; i < points.length - 1; i++) {
+        const start = points[i];
+        const end = points[i + 1];
+        // Skip very short segments (< 0.5s)
+        if (end - start < 0.5) continue;
+
+        newTrims.push({
+          id: nextTrimId + i,
+          startTime: start,
+          endTime: end,
+          colorIndex: (trims.length + i) % TRIM_COLORS.length,
+        });
+      }
+
+      if (newTrims.length > 0) {
+        setTrims(prev => [...prev, ...newTrims]);
+        setNextTrimId(prev => prev + newTrims.length);
+      }
+    } catch (err) {
+      console.error("Scene detection failed:", err);
+    } finally {
+      setIsDetectingScenes(false);
+    }
+  }, [isDetectingScenes, filePath, duration, nextTrimId, trims.length]);
 
   // Delete a trim by id
   const deleteTrim = useCallback((id: number) => {
@@ -722,37 +783,38 @@ export function TrimModal({
         {/* Video Preview + Sidebar - fills available space */}
         <div className="flex-1 flex min-h-0 overflow-hidden">
           {/* Video area */}
-          <div className="flex-1 bg-black flex items-center justify-center relative overflow-hidden">
-            <video
-              ref={videoRef}
-              src={videoSrc}
-              crossOrigin="anonymous"
-              className="max-w-full max-h-full object-contain"
-              playsInline
-              muted={!isPlaying || isMuted}
-              volume={volume}
-              preload="metadata"
-              onLoadedMetadata={handleLoadedMetadata}
-              onTimeUpdate={handleTimeUpdate}
-              onSeeked={handleSeeked}
-              onEnded={() => {
-                // Loop back to start of video
-                if (videoRef.current) {
-                  videoRef.current.currentTime = 0;
-                  prevTimeRef.current = 0;
-                  videoRef.current.play();
-                }
-              }}
-            />
-
-            {/* Cached frame overlay - shows instantly when scrubbing cached areas */}
-            {cachedFrame && (
-              <img
-                src={cachedFrame}
-                alt=""
-                className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+          <div className="flex-1 bg-black flex items-center justify-center overflow-hidden relative">
+            <div className="relative max-w-full max-h-full">
+              <video
+                ref={videoRef}
+                src={videoSrc}
+                crossOrigin="anonymous"
+                className="max-w-full max-h-full object-contain block"
+                playsInline
+                muted={isMuted}
+                preload="metadata"
+                onLoadedMetadata={handleLoadedMetadata}
+                onTimeUpdate={handleTimeUpdate}
+                onSeeked={handleSeeked}
+                onEnded={() => {
+                  // Loop back to start of video
+                  if (videoRef.current) {
+                    videoRef.current.currentTime = 0;
+                    prevTimeRef.current = 0;
+                    videoRef.current.play();
+                  }
+                }}
               />
-            )}
+
+              {/* Cached frame overlay - shows instantly when scrubbing cached areas */}
+              {cachedFrame && (
+                <img
+                  src={cachedFrame}
+                  alt=""
+                  className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                />
+              )}
+            </div>
 
             {/* Play/Pause button overlay */}
             <button
@@ -775,7 +837,7 @@ export function TrimModal({
           </div>
 
           {/* Sidebar */}
-          <div className="w-[260px] border-l bg-card flex flex-col">
+          <div className="w-[280px] border-l bg-background flex flex-col">
             {/* Tab switcher */}
             <div className="p-2">
               <ButtonGroup className="w-full">
@@ -811,38 +873,93 @@ export function TrimModal({
                 {sidebarTab === 'trims' ? 'Trim' : 'Marker'}
               </Button>
               {sidebarTab === 'trims' && (
-                <div className="relative flex-1">
-                  <Button
-                    variant="subtle"
-                    size="sm"
-                    className="w-full"
-                    onClick={() => setPresetsOpen(!presetsOpen)}
-                    disabled={loading}
-                  >
-                    <Plus className="h-4 w-4 mr-1" />
-                    Trim preset
-                  </Button>
-                  {presetsOpen && (
-                    <>
-                      <div
-                        className="fixed inset-0 z-40"
-                        onClick={() => setPresetsOpen(false)}
-                      />
-                      <div className="absolute top-full left-0 mt-1 bg-background border rounded-md shadow-lg z-50 py-1 min-w-full">
-                        {QUICK_DURATIONS.map((sec) => (
+                <>
+                  <div className="relative flex-1">
+                    <Button
+                      variant="subtle"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => setPresetsOpen(!presetsOpen)}
+                      disabled={loading}
+                    >
+                      <Plus className="h-4 w-4 mr-1" />
+                      Preset
+                    </Button>
+                    {presetsOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setPresetsOpen(false)}
+                        />
+                        <div className="absolute top-full left-0 mt-1 bg-background border rounded-md shadow-lg z-50 py-1 min-w-full">
+                          {QUICK_DURATIONS.map((sec) => (
+                            <button
+                              key={sec}
+                              onClick={() => handleQuickDuration(sec)}
+                              disabled={duration < sec}
+                              className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {sec}s
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <div className="relative flex-1">
+                    <Button
+                      variant="subtle"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => !isDetectingScenes && setAutoDetectOpen(!autoDetectOpen)}
+                      disabled={loading || isDetectingScenes}
+                    >
+                      {isDetectingScenes ? (
+                        <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                      ) : (
+                        <Wand2 className="h-4 w-4 mr-1" />
+                      )}
+                      Auto
+                    </Button>
+                    {autoDetectOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setAutoDetectOpen(false)}
+                        />
+                        <div className="absolute top-full right-0 mt-1 bg-background border rounded-md shadow-lg z-50 py-1 min-w-[140px]">
+                          <div className="px-3 py-1.5 text-xs text-muted-foreground font-medium">
+                            Detection strength
+                          </div>
                           <button
-                            key={sec}
-                            onClick={() => handleQuickDuration(sec)}
-                            disabled={duration < sec}
-                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={() => handleAutoDetect(0.5)}
+                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted whitespace-nowrap"
                           >
-                            {sec}s
+                            Low
                           </button>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                </div>
+                          <button
+                            onClick={() => handleAutoDetect(0.3)}
+                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted whitespace-nowrap"
+                          >
+                            Medium
+                          </button>
+                          <button
+                            onClick={() => handleAutoDetect(0.2)}
+                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted whitespace-nowrap"
+                          >
+                            High
+                          </button>
+                          <button
+                            onClick={() => handleAutoDetect(0.1)}
+                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-muted whitespace-nowrap"
+                          >
+                            Very High
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </>
               )}
             </div>
 
