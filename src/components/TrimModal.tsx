@@ -57,9 +57,12 @@ export function TrimModal({
   const videoRef = useRef<HTMLVideoElement>(null);
   const prevTimeRef = useRef(0);
   const animationFrameRef = useRef<number | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameCacheRef = useRef<Map<number, string>>(new Map());
   const pendingCaptureRef = useRef<number | null>(null);
+  const capturingRef = useRef<Set<number>>(new Set()); // Track in-progress captures
+  const failedCapturesRef = useRef<Set<number>>(new Set()); // Track failed captures to avoid retrying
+  const captureQueueRef = useRef<number[]>([]); // Queue for pending captures
+  const processingQueueRef = useRef<boolean>(false); // Whether queue is being processed
   const [cachedFrame, setCachedFrame] = useState<string | null>(null);
   const [duration, setDuration] = useState(0);
   const [trims, setTrims] = useState<Trim[]>([]);
@@ -88,28 +91,68 @@ export function TrimModal({
   // Frame cache helpers - quantize time to 0.1s intervals for cache keys
   const getCacheKey = useCallback((time: number) => Math.round(time * 10) / 10, []);
 
-  const captureFrame = useCallback((video: HTMLVideoElement, time: number) => {
-    if (!canvasRef.current) {
-      canvasRef.current = document.createElement('canvas');
+  // Process the capture queue one at a time to prevent backend race conditions
+  const processQueue = useCallback(async () => {
+    if (processingQueueRef.current || captureQueueRef.current.length === 0) {
+      return;
     }
-    const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
 
-    ctx.drawImage(video, 0, 0);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+    processingQueueRef.current = true;
+
+    while (captureQueueRef.current.length > 0) {
+      const key = captureQueueRef.current.shift()!;
+
+      // Skip if already cached or failed
+      if (frameCacheRef.current.has(key) || failedCapturesRef.current.has(key)) {
+        continue;
+      }
+
+      capturingRef.current.add(key);
+
+      try {
+        // Use the key (quantized time) for extraction
+        const dataUrl = await invoke<string>("extract_frame", { path: filePath, timestamp: key });
+
+        // Limit cache size to ~400 frames (FIFO eviction)
+        if (frameCacheRef.current.size > 400) {
+          const firstKey = frameCacheRef.current.keys().next().value;
+          if (firstKey !== undefined) frameCacheRef.current.delete(firstKey);
+        }
+
+        frameCacheRef.current.set(key, dataUrl);
+        console.log(`[CACHE] Captured frame at ${key}s (cache size: ${frameCacheRef.current.size})`);
+      } catch (err) {
+        console.error(`[CACHE] Failed to capture frame at ${key}s:`, err);
+        // Mark as failed to avoid retrying this frame
+        failedCapturesRef.current.add(key);
+      } finally {
+        capturingRef.current.delete(key);
+      }
+    }
+
+    processingQueueRef.current = false;
+  }, [filePath]);
+
+  // Queue a frame for capture (non-blocking, sequential processing)
+  const captureFrame = useCallback((time: number) => {
     const key = getCacheKey(time);
 
-    // Limit cache size to ~200 frames (LRU-style: just cap the size)
-    if (frameCacheRef.current.size > 200) {
-      const firstKey = frameCacheRef.current.keys().next().value;
-      if (firstKey !== undefined) frameCacheRef.current.delete(firstKey);
+    // Skip if already cached, failed, capturing, or already queued
+    if (
+      frameCacheRef.current.has(key) ||
+      failedCapturesRef.current.has(key) ||
+      capturingRef.current.has(key) ||
+      captureQueueRef.current.includes(key)
+    ) {
+      return;
     }
 
-    frameCacheRef.current.set(key, dataUrl);
-  }, [getCacheKey]);
+    // Add to queue
+    captureQueueRef.current.push(key);
+
+    // Start processing if not already running
+    processQueue();
+  }, [getCacheKey, processQueue]);
 
   // Load filmstrip and saved data when modal opens
   useEffect(() => {
@@ -127,6 +170,10 @@ export function TrimModal({
     setPlayheadLocked(false);
     setCachedFrame(null);
     frameCacheRef.current.clear();
+    capturingRef.current.clear();
+    failedCapturesRef.current.clear();
+    captureQueueRef.current = [];
+    processingQueueRef.current = false;
 
     const loadData = async () => {
       try {
@@ -257,7 +304,7 @@ export function TrimModal({
       // Cache frames during playback (every 0.1s to match cache key quantization)
       const cacheKey = getCacheKey(currTime);
       if (cacheKey !== lastCaptureTime && !frameCacheRef.current.has(cacheKey)) {
-        captureFrame(video, currTime);
+        captureFrame(currTime);
         lastCaptureTime = cacheKey;
       }
 
@@ -456,9 +503,11 @@ export function TrimModal({
 
     if (cached) {
       // Cache hit! Show cached frame instantly (no video seek needed)
+      console.log(`[CACHE] HIT at ${cacheKey}s`);
       setCachedFrame(cached);
     } else {
       // Cache miss - use accurate seek (not fastSeek) to get exact frame
+      console.log(`[CACHE] MISS at ${cacheKey}s - seeking video`);
       setCachedFrame(null);
       pendingCaptureRef.current = time;
       video.currentTime = time; // Accurate seek for correct frame capture
@@ -467,12 +516,14 @@ export function TrimModal({
 
   // Capture frames after video seeks (for caching)
   const handleSeeked = useCallback(() => {
-    const video = videoRef.current;
-    if (!video || isPlaying) return;
+    if (isPlaying) {
+      return;
+    }
 
     // Capture frame if we have a pending capture request
     if (pendingCaptureRef.current !== null) {
-      captureFrame(video, pendingCaptureRef.current);
+      console.log(`[CACHE] handleSeeked - capturing pending frame at ${pendingCaptureRef.current}s`);
+      captureFrame(pendingCaptureRef.current);
       pendingCaptureRef.current = null;
     }
   }, [isPlaying, captureFrame]);
@@ -636,6 +687,7 @@ export function TrimModal({
             <video
               ref={videoRef}
               src={videoSrc}
+              crossOrigin="anonymous"
               className="max-w-full max-h-full object-contain"
               playsInline
               muted

@@ -26,9 +26,13 @@ async fn get_video_duration(app: tauri::AppHandle, path: String) -> Result<f64, 
 async fn extract_frame(app: tauri::AppHandle, path: String, timestamp: f64) -> Result<String, String> {
     let ffmpeg = get_ffmpeg_path(&app);
 
-    // Create temp file for the frame
+    // Create temp file for the frame with unique name (timestamp + random)
     let temp_dir = std::env::temp_dir();
-    let frame_path = temp_dir.join(format!("frame_{}.jpg", std::process::id()));
+    let unique_id = format!("{}_{}", std::process::id(), std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos());
+    let frame_path = temp_dir.join(format!("frame_{}.jpg", unique_id));
     let frame_str = frame_path.to_string_lossy().to_string();
 
     // Extract frame using ffmpeg
