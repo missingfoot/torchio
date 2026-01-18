@@ -136,14 +136,19 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
-            patchelf \
-            ffmpeg
+            patchelf
 
-      - name: Setup FFmpeg binaries
+      - name: Download FFmpeg (Linux static)
         run: |
-          echo "Copying system FFmpeg binaries..."
-          cp $(which ffmpeg) src-tauri/ffmpeg/ffmpeg
-          cp $(which ffprobe) src-tauri/ffmpeg/ffprobe
+          echo "Downloading static FFmpeg..."
+          curl -L -o /tmp/ffmpeg.tar.xz "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+
+          echo "Extracting FFmpeg..."
+          tar -xf /tmp/ffmpeg.tar.xz -C /tmp
+
+          echo "Copying FFmpeg binaries..."
+          cp /tmp/ffmpeg-*-amd64-static/ffmpeg src-tauri/ffmpeg/ffmpeg
+          cp /tmp/ffmpeg-*-amd64-static/ffprobe src-tauri/ffmpeg/ffprobe
           chmod +x src-tauri/ffmpeg/ffmpeg src-tauri/ffmpeg/ffprobe
 
           echo "FFmpeg binaries ready:"
