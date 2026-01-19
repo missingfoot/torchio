@@ -17,6 +17,7 @@ interface UseMarkerManagerReturn {
   addMarkerAtPlayhead: () => void;
   deleteMarker: (id: number) => void;
   updateMarkerName: (id: number, name: string) => void;
+  updateMarkerTime: (id: number, time: number) => void;
   selectedMarkerId: number | null;
   setSelectedMarkerId: (id: number | null) => void;
 }
@@ -60,6 +61,11 @@ export function useMarkerManager({
     setMarkers(prev => prev.map(m => m.id === id ? { ...m, name: name.trim() || undefined } : m));
   }, [setMarkers]);
 
+  // Update marker time (for dragging)
+  const updateMarkerTime = useCallback((id: number, time: number) => {
+    setMarkers(prev => prev.map(m => m.id === id ? { ...m, time } : m).sort((a, b) => a.time - b.time));
+  }, [setMarkers]);
+
   // Add marker at playhead (or both ends of loop zone if active)
   const addMarkerAtPlayhead = useCallback(() => {
     if (loopZone) {
@@ -76,6 +82,7 @@ export function useMarkerManager({
     addMarkerAtPlayhead,
     deleteMarker,
     updateMarkerName,
+    updateMarkerTime,
     selectedMarkerId,
     setSelectedMarkerId,
   };

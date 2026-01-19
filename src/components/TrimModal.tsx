@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { SquareSplitHorizontal, MousePointer, Scissors } from "lucide-react";
+import { SquareSplitHorizontal, MousePointer, Scissors, ChevronDown, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Modal, ModalHeader, ModalTitle } from "./ui/modal";
+import { Modal } from "./ui/modal";
 import { Button, ButtonGroup } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { TrimBar } from "./TrimBar";
 import { TrimSidebar } from "./TrimSidebar";
 import { PlaybackControls } from "./PlaybackControls";
+import { FileInfoPanel } from "./FileInfoPanel";
 import { formatDuration } from "@/lib/utils";
 import { useExport } from "@/contexts/ExportContext";
 import { useFrameCache } from "@/hooks/useFrameCache";
@@ -42,9 +43,12 @@ export function TrimModal({
   const videoRef = useRef<HTMLVideoElement>(null);
   const pendingCaptureRef = useRef<number | null>(null);
   const frameCacheRef = useRef<Map<number, string>>(new Map());
+  const fileInfoTriggerRef = useRef<HTMLButtonElement>(null);
 
   // UI state
   const [duration, setDuration] = useState(0);
+  const [videoWidth, setVideoWidth] = useState(0);
+  const [videoHeight, setVideoHeight] = useState(0);
   const [filmstrip, setFilmstrip] = useState<string[]>([]);
   const [cachedFrame, setCachedFrame] = useState<string | null>(null);
   const [trimsVisible, setTrimsVisible] = useState(true);
@@ -55,6 +59,8 @@ export function TrimModal({
   const [loopZone, setLoopZone] = useState<{ start: number; end: number } | null>(null);
   const [playheadLocked, setPlayheadLocked] = useState(false);
   const [showRemaining, setShowRemaining] = useState(false);
+  const [showFileInfo, setShowFileInfo] = useState(false);
+  const [snappingEnabled, setSnappingEnabled] = useState(true);
 
   const isValid = true;
   const videoSrc = convertFileSrc(filePath);
@@ -145,6 +151,8 @@ export function TrimModal({
     // Reset UI state
     setFilmstrip([]);
     setDuration(0);
+    setVideoWidth(0);
+    setVideoHeight(0);
     setTrimsVisible(true);
     setMarkersVisible(true);
     setBarMode('select');
@@ -157,12 +165,14 @@ export function TrimModal({
 
     const loadFilmstrip = async () => {
       try {
-        const dur = await invoke<number>("get_video_duration", { path: filePath });
-        setDuration(dur);
+        const info = await invoke<{ duration: number; width: number; height: number }>("get_video_info_cmd", { path: filePath });
+        setDuration(info.duration);
+        setVideoWidth(info.width);
+        setVideoHeight(info.height);
 
         const frames = await invoke<string[]>("extract_filmstrip", {
           path: filePath,
-          duration: dur,
+          duration: info.duration,
           count: 10,
         });
         setFilmstrip(frames);
@@ -194,6 +204,13 @@ export function TrimModal({
 
     return () => clearTimeout(timeout);
   }, [playback.isPlaying, playback.currentTime, open, persistence.loading, duration, prefetchAroundTime]);
+
+  // Clear cached frame when video is playing
+  useEffect(() => {
+    if (playback.isPlaying) {
+      setCachedFrame(null);
+    }
+  }, [playback.isPlaying]);
 
   // Deselect marker when playhead moves away from it
   useEffect(() => {
@@ -263,6 +280,7 @@ export function TrimModal({
 
   // Seek to a specific time
   const handleSeek = (time: number) => {
+    setCachedFrame(null);
     playback.seekTo(time);
   };
 
@@ -315,22 +333,54 @@ export function TrimModal({
       <TooltipProvider delayDuration={300}>
         <div className="flex flex-col h-full">
           {/* Header */}
-          <div className="p-4 border-b">
-            <ModalHeader onClose={handleCancel}>
-              <ModalTitle>Trim Video</ModalTitle>
-            </ModalHeader>
+          <div className="px-3 py-2 border-b flex items-center">
+            {/* Left - title */}
+            <span className="text-sm font-medium w-24">Trim Video</span>
+
+            {/* Center - file name dropdown */}
+            <div className="flex-1 flex justify-center">
+              <div className="relative">
+                <button
+                  ref={fileInfoTriggerRef}
+                  onClick={() => setShowFileInfo(!showFileInfo)}
+                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <span className="truncate max-w-md">{fileName}</span>
+                  <ChevronDown className={`h-3 w-3 flex-shrink-0 transition-transform ${showFileInfo ? 'rotate-180' : ''}`} />
+                </button>
+                <FileInfoPanel
+                  open={showFileInfo}
+                  onClose={() => setShowFileInfo(false)}
+                  filePath={filePath}
+                  fileName={fileName}
+                  fileSize={fileSize}
+                  triggerRef={fileInfoTriggerRef}
+                />
+              </div>
+            </div>
+
+            {/* Right - close button */}
+            <button
+              onClick={handleCancel}
+              className="p-1.5 rounded hover:bg-muted transition-colors"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
 
           {/* Video Preview + Sidebar */}
           <div className="flex-1 flex min-h-0 overflow-hidden">
             {/* Video area */}
             <div className="flex-1 bg-black flex items-center justify-center overflow-hidden relative">
-              <div className="relative max-w-full max-h-full">
+              <div
+                className="relative max-w-full max-h-full"
+                style={videoWidth > 0 && videoHeight > 0 ? { aspectRatio: `${videoWidth} / ${videoHeight}` } : undefined}
+              >
                 <video
                   ref={videoRef}
                   src={videoSrc}
                   crossOrigin="anonymous"
-                  className="max-w-full max-h-full object-contain block"
+                  className="w-full h-full object-contain block"
                   playsInline
                   muted={playback.isMuted}
                   preload="metadata"
@@ -418,7 +468,7 @@ export function TrimModal({
                       <Button
                         variant="subtle"
                         size="sm"
-                        onClick={() => { setBarMode('select'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
+                        onClick={() => { setBarMode('select'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); setPlayheadLocked(false); }}
                         className={barMode === 'select' ? 'bg-blue-500/20 text-blue-400' : ''}
                       >
                         <MousePointer className="h-4 w-4 mr-1" />
@@ -434,7 +484,7 @@ export function TrimModal({
                       <Button
                         variant="subtle"
                         size="sm"
-                        onClick={() => { setBarMode('trim'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
+                        onClick={() => { setBarMode('trim'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); setPlayheadLocked(false); }}
                         className={barMode === 'trim' ? 'bg-yellow-500/20 text-yellow-400' : ''}
                       >
                         <Scissors className="h-4 w-4 mr-1" />
@@ -450,7 +500,7 @@ export function TrimModal({
                       <Button
                         variant="subtle"
                         size="sm"
-                        onClick={() => { setBarMode('marker'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); }}
+                        onClick={() => { setBarMode('marker'); setLoopZone(null); setPendingTrimStart(null); setPendingTrimEnd(null); setPlayheadLocked(false); }}
                         className={barMode === 'marker' ? 'bg-red-500/20 text-red-400' : ''}
                       >
                         <SquareSplitHorizontal className="h-4 w-4 mr-1" />
@@ -462,6 +512,13 @@ export function TrimModal({
                     </TooltipContent>
                   </Tooltip>
                 </ButtonGroup>
+
+                {/* Mode tip */}
+                <span className="text-xs text-muted-foreground">
+                  {barMode === 'select' && 'Hover to preview. Click to seek. Drag to loop a section.'}
+                  {barMode === 'trim' && 'Click to set start, click again to set end. Drag to create a trim region.'}
+                  {barMode === 'marker' && 'Click on timeline to place a marker at that position.'}
+                </span>
               </div>
 
               {/* Playhead / Total duration */}
@@ -497,6 +554,7 @@ export function TrimModal({
                 onSeek={handleSeek}
                 onTrimCreate={trimManager.createTrim}
                 onMarkerAdd={markerManager.addMarker}
+                onMarkerUpdate={markerManager.updateMarkerTime}
                 onPendingTrimChange={setPendingTrimStart}
                 onPendingTrimEndChange={setPendingTrimEnd}
                 loopZone={loopZone}
@@ -504,6 +562,7 @@ export function TrimModal({
                 playheadLocked={playheadLocked}
                 onPlayheadLockChange={setPlayheadLocked}
                 cachedTimes={frameCache.cachedTimes}
+                snappingEnabled={snappingEnabled}
               />
             ) : (
               <div className="h-16 bg-muted rounded-lg flex items-center justify-center text-sm text-muted-foreground">
@@ -520,6 +579,7 @@ export function TrimModal({
                 isMuted={playback.isMuted}
                 volume={playback.volume}
                 loopZone={loopZone}
+                snappingEnabled={snappingEnabled}
                 onGoToStart={playback.goToStart}
                 onStepBackward={() => playback.stepFrame('backward')}
                 onStepForward={() => playback.stepFrame('forward')}
@@ -528,6 +588,7 @@ export function TrimModal({
                 onAddTrim={trimManager.addTrim}
                 onToggleMute={() => playback.setIsMuted(!playback.isMuted)}
                 onVolumeChange={handleVolumeChange}
+                onToggleSnapping={() => setSnappingEnabled(!snappingEnabled)}
               />
 
               {/* Right side: cancel/confirm */}

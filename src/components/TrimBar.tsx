@@ -1,5 +1,6 @@
-import { useRef, useCallback } from "react";
+import { useRef, useCallback, useState } from "react";
 import type { Trim, Marker } from "@/types";
+import { formatDuration } from "@/lib/utils";
 
 // Utility: Snap a time value to the nearest locked time if within threshold
 function snapToLockedTime(
@@ -24,16 +25,19 @@ interface TimelineHandleProps {
   colorClass: string;
   onMouseDown?: (e: React.MouseEvent) => void;
   interactive?: boolean;
+  edge: 'start' | 'end'; // which edge - determines positioning
 }
 
-function TimelineHandle({ position, colorClass, onMouseDown, interactive = true }: TimelineHandleProps) {
+function TimelineHandle({ position, colorClass, onMouseDown, interactive = true, edge }: TimelineHandleProps) {
+  // Position handle on outer edge: start handle to the left, end handle to the right
+  const offset = edge === 'start' ? '-12px' : '0px';
   return (
     <div
       className={`absolute top-0 bottom-0 w-3 ${interactive ? 'cursor-ew-resize' : ''} z-20 flex items-center justify-center ${!interactive ? 'pointer-events-none' : ''}`}
-      style={{ left: `calc(${position}% - 6px)` }}
+      style={{ left: `calc(${position}% + ${offset})` }}
       onMouseDown={interactive ? onMouseDown : undefined}
     >
-      <div className={`w-0.5 h-8 ${colorClass} rounded-full`} />
+      <div className={`w-[3px] h-8 ${colorClass} rounded-full`} />
     </div>
   );
 }
@@ -91,6 +95,7 @@ interface TrimBarProps {
   onSeek: (time: number) => void;
   onTrimCreate: (startTime: number, endTime: number) => void;
   onMarkerAdd: (time: number) => void;
+  onMarkerUpdate: (id: number, time: number) => void;
   onPendingTrimChange: (time: number | null) => void;
   onPendingTrimEndChange: (time: number | null) => void;
   // Loop zone props (seek mode)
@@ -101,6 +106,8 @@ interface TrimBarProps {
   onPlayheadLockChange: (locked: boolean) => void;
   // Cached frame times for visual indicator
   cachedTimes?: number[];
+  // Snapping toggle
+  snappingEnabled: boolean;
 }
 
 export function TrimBar({
@@ -121,6 +128,7 @@ export function TrimBar({
   onSeek,
   onTrimCreate,
   onMarkerAdd,
+  onMarkerUpdate,
   onPendingTrimChange,
   onPendingTrimEndChange,
   loopZone,
@@ -128,12 +136,22 @@ export function TrimBar({
   playheadLocked,
   onPlayheadLockChange,
   cachedTimes = [],
+  snappingEnabled,
 }: TrimBarProps) {
-  // Extract times for snapping purposes
-  const lockedTimes = markers.map(m => m.time);
+  // Helper to get snap targets excluding a specific trim's edges (for self-snapping prevention)
+  const getSnapTargetsForTrim = useCallback((excludeTrimId: number) => {
+    return [
+      ...markers.map(m => m.time),
+      ...trims
+        .filter(t => t.id !== excludeTrimId)
+        .flatMap(t => [t.startTime, t.endTime])
+    ];
+  }, [markers, trims]);
+
   const barRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
   const isClickingRef = useRef(false); // Prevent hover from overwriting click
+  const [hoverInfo, setHoverInfo] = useState<{ x: number; time: number } | null>(null);
 
   const getTimeFromPosition = useCallback(
     (clientX: number) => {
@@ -145,6 +163,14 @@ export function TrimBar({
     [duration]
   );
 
+  // Helper to update hover info from drag handlers
+  const updateHoverFromClientX = useCallback((clientX: number) => {
+    if (!barRef.current) return;
+    const rect = barRef.current.getBoundingClientRect();
+    const time = getTimeFromPosition(clientX);
+    setHoverInfo({ x: clientX - rect.left, time });
+  }, [getTimeFromPosition]);
+
   // Generic factory for creating handle drag handlers (start/end)
   const createHandleDrag = useCallback(
     (config: {
@@ -154,6 +180,7 @@ export function TrimBar({
       edge: 'start' | 'end';
       minDuration: number;
       enableSnapping: boolean;
+      snapTargets: number[];
     }) => (e: React.MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
@@ -167,7 +194,7 @@ export function TrimBar({
         let time = getTimeFromPosition(ev.clientX);
 
         if (config.enableSnapping) {
-          time = snapToLockedTime(time, lockedTimes, rect, duration);
+          time = snapToLockedTime(time, config.snapTargets, rect, duration);
         }
 
         let newStart = initial.start;
@@ -181,6 +208,7 @@ export function TrimBar({
 
         config.onUpdate(newStart, newEnd);
         config.onMove?.(config.edge === 'start' ? newStart : newEnd);
+        updateHoverFromClientX(ev.clientX);
       };
 
       const handleMouseUp = () => {
@@ -192,7 +220,7 @@ export function TrimBar({
       document.addEventListener("mousemove", handleMouseMove);
       document.addEventListener("mouseup", handleMouseUp);
     },
-    [getTimeFromPosition, duration, lockedTimes]
+    [getTimeFromPosition, duration, updateHoverFromClientX]
   );
 
   // Generic factory for creating region drag handlers
@@ -202,6 +230,8 @@ export function TrimBar({
       onUpdate: (start: number, end: number) => void;
       onMove?: (time: number) => void;
       enableSnapping: boolean;
+      snapTargets: number[];
+      trackEdge?: 'start' | 'end';
     }) => (e: React.MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
@@ -232,12 +262,12 @@ export function TrimBar({
 
         // Snap to locked times (check both edges)
         if (config.enableSnapping) {
-          const snappedStart = snapToLockedTime(newStart, lockedTimes, rect, duration);
+          const snappedStart = snapToLockedTime(newStart, config.snapTargets, rect, duration);
           if (snappedStart !== newStart) {
             newStart = snappedStart;
             newEnd = snappedStart + regionDuration;
           } else {
-            const snappedEnd = snapToLockedTime(newEnd, lockedTimes, rect, duration);
+            const snappedEnd = snapToLockedTime(newEnd, config.snapTargets, rect, duration);
             if (snappedEnd !== newEnd) {
               newEnd = snappedEnd;
               newStart = snappedEnd - regionDuration;
@@ -246,7 +276,8 @@ export function TrimBar({
         }
 
         config.onUpdate(newStart, newEnd);
-        config.onMove?.(newStart);
+        config.onMove?.(config.trackEdge === 'end' ? newEnd : newStart);
+        updateHoverFromClientX(ev.clientX);
       };
 
       const handleMouseUp = () => {
@@ -258,7 +289,7 @@ export function TrimBar({
       document.addEventListener("mousemove", handleMouseMove);
       document.addEventListener("mouseup", handleMouseUp);
     },
-    [duration, lockedTimes]
+    [duration, updateHoverFromClientX]
   );
 
   // Trim drag handlers (using factories)
@@ -269,9 +300,10 @@ export function TrimBar({
       onMove: onHover,
       edge: 'start',
       minDuration: 1,
-      enableSnapping: true,
+      enableSnapping: snappingEnabled,
+      snapTargets: getSnapTargetsForTrim(trim.id),
     })(e),
-    [createHandleDrag, onTrimUpdate, onHover]
+    [createHandleDrag, onTrimUpdate, onHover, snappingEnabled, getSnapTargetsForTrim]
   );
 
   const handleEndDrag = useCallback(
@@ -281,19 +313,29 @@ export function TrimBar({
       onMove: onHover,
       edge: 'end',
       minDuration: 1,
-      enableSnapping: true,
+      enableSnapping: snappingEnabled,
+      snapTargets: getSnapTargetsForTrim(trim.id),
     })(e),
-    [createHandleDrag, onTrimUpdate, onHover]
+    [createHandleDrag, onTrimUpdate, onHover, snappingEnabled, getSnapTargetsForTrim]
   );
 
   const handleRegionDrag = useCallback(
-    (e: React.MouseEvent, trim: Trim) => createRegionDrag({
-      getRange: () => ({ start: trim.startTime, end: trim.endTime }),
-      onUpdate: (start, end) => onTrimUpdate(trim.id, start, end),
-      onMove: onHover,
-      enableSnapping: true,
-    })(e),
-    [createRegionDrag, onTrimUpdate, onHover]
+    (e: React.MouseEvent, trim: Trim) => {
+      // Determine which half of the trim was clicked to track that edge
+      const clickTime = getTimeFromPosition(e.clientX);
+      const trimMidpoint = (trim.startTime + trim.endTime) / 2;
+      const trackEdge = clickTime < trimMidpoint ? 'start' : 'end';
+
+      createRegionDrag({
+        getRange: () => ({ start: trim.startTime, end: trim.endTime }),
+        onUpdate: (start, end) => onTrimUpdate(trim.id, start, end),
+        onMove: onHover,
+        enableSnapping: snappingEnabled,
+        snapTargets: getSnapTargetsForTrim(trim.id),
+        trackEdge,
+      })(e);
+    },
+    [createRegionDrag, onTrimUpdate, onHover, snappingEnabled, getSnapTargetsForTrim, getTimeFromPosition]
   );
 
   // Loop zone drag handlers (using factories)
@@ -307,6 +349,7 @@ export function TrimBar({
         edge: 'start',
         minDuration: 0.3,
         enableSnapping: false,
+        snapTargets: [],
       })(e);
     },
     [loopZone, createHandleDrag, onLoopZoneChange, onSeek]
@@ -322,6 +365,7 @@ export function TrimBar({
         edge: 'end',
         minDuration: 0.3,
         enableSnapping: false,
+        snapTargets: [],
       })(e);
     },
     [loopZone, createHandleDrag, onLoopZoneChange, onSeek]
@@ -335,6 +379,7 @@ export function TrimBar({
         onUpdate: (start, end) => onLoopZoneChange({ start, end }),
         onMove: onSeek,
         enableSnapping: false,
+        snapTargets: [],
       })(e);
     },
     [loopZone, createRegionDrag, onLoopZoneChange, onSeek]
@@ -350,13 +395,9 @@ export function TrimBar({
 
       switch (mode) {
         case 'select':
-          // If loop zone exists, clicking clears it and seeks (but doesn't lock)
+          // Clear any existing loop zone first
           if (loopZone) {
             onLoopZoneChange(null);
-            onSeek(time);
-            // Don't lock - hover following resumes
-            isDraggingRef.current = false;
-            return;
           }
 
           // Set clicking flag to prevent hover interference
@@ -373,6 +414,7 @@ export function TrimBar({
             const currentT = getTimeFromPosition(ev.clientX);
             onSeek(currentT);
             onHover?.(currentT); // Update frame preview
+            updateHoverFromClientX(ev.clientX);
 
             // Update loop zone live as user drags
             const start = Math.min(seekStartTime, currentT);
@@ -424,6 +466,7 @@ export function TrimBar({
               const currentT = getTimeFromPosition(ev.clientX);
               onSeek(currentT);
               onHover?.(currentT); // Update frame preview
+              updateHoverFromClientX(ev.clientX);
               // Update pending trim end to show live solid preview
               onPendingTrimEndChange(currentT);
             };
@@ -466,7 +509,7 @@ export function TrimBar({
           break;
       }
     },
-    [mode, pendingTrimStart, getTimeFromPosition, onSeek, onTrimCreate, onMarkerAdd, onPendingTrimChange, onPendingTrimEndChange, loopZone, onLoopZoneChange, playheadLocked, onPlayheadLockChange]
+    [mode, pendingTrimStart, getTimeFromPosition, onSeek, onTrimCreate, onMarkerAdd, onPendingTrimChange, onPendingTrimEndChange, loopZone, onLoopZoneChange, playheadLocked, onPlayheadLockChange, updateHoverFromClientX]
   );
 
   // Calculate dimmed regions (areas outside all trims or loop zone)
@@ -541,12 +584,21 @@ export function TrimBar({
       ref={barRef}
       className={`relative h-16 bg-muted overflow-visible select-none ${cursorClass}`}
       onMouseMove={(e) => {
-        if (onHover && !isDraggingRef.current && !isClickingRef.current) {
-          const time = getTimeFromPosition(e.clientX);
-          onHover(time);
+        const time = getTimeFromPosition(e.clientX);
+        // Track position for hover tooltip (always update)
+        if (barRef.current) {
+          const rect = barRef.current.getBoundingClientRect();
+          setHoverInfo({ x: e.clientX - rect.left, time });
+        }
+        // Only update hover preview when not dragging
+        if (!isDraggingRef.current && !isClickingRef.current) {
+          if (onHover) onHover(time);
         }
       }}
-      onMouseLeave={() => onHover?.(null)}
+      onMouseLeave={() => {
+        onHover?.(null);
+        setHoverInfo(null);
+      }}
       onMouseDown={handleBarMouseDown}
     >
       {/* Filmstrip background */}
@@ -610,11 +662,13 @@ export function TrimBar({
               position={startPercent}
               colorClass={color.dot}
               onMouseDown={(e) => handleStartDrag(e, trim)}
+              edge="start"
             />
             <TimelineHandle
               position={endPercent}
               colorClass={color.dot}
               onMouseDown={(e) => handleEndDrag(e, trim)}
+              edge="end"
             />
           </div>
         );
@@ -625,24 +679,64 @@ export function TrimBar({
         const isSelected = selectedMarkerId === marker.id;
         const leftPercent = (marker.time / duration) * 100;
         return (
-          <div key={marker.id} className="pointer-events-none z-20">
-            {/* Triangle flag above the timeline - point touches the top */}
+          <div
+            key={marker.id}
+            className="absolute top-0 bottom-0 z-20 hover:z-40 cursor-ew-resize group"
+            style={{
+              left: `${leftPercent}%`,
+              width: '13px',
+              marginLeft: '-6px',
+            }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              isDraggingRef.current = true;
+
+              const handleMouseMove = (ev: MouseEvent) => {
+                const time = Math.max(0, Math.min(duration, getTimeFromPosition(ev.clientX)));
+                onMarkerUpdate(marker.id, time);
+                onSeek(time);
+                onHover?.(time);
+                updateHoverFromClientX(ev.clientX);
+              };
+
+              const handleMouseUp = () => {
+                document.removeEventListener('mousemove', handleMouseMove);
+                document.removeEventListener('mouseup', handleMouseUp);
+                setTimeout(() => { isDraggingRef.current = false; }, 0);
+              };
+
+              document.addEventListener('mousemove', handleMouseMove);
+              document.addEventListener('mouseup', handleMouseUp);
+            }}
+          >
+            {/* Square flag - expands on hover or when selected to show name */}
             <div
-              className="absolute"
+              className="absolute flex items-center whitespace-nowrap overflow-hidden transition-all duration-150 bg-red-400 text-zinc-900"
               style={{
-                left: `calc(${leftPercent}% - 5px)`,
-                top: -5,
-                width: 0,
-                height: 0,
-                borderLeft: '5px solid transparent',
-                borderRight: '5px solid transparent',
-                borderTop: isSelected ? '6px solid white' : '6px solid #f87171',
+                left: '6px',
+                top: -13,
+                height: '11px',
+                fontSize: '9px',
+                lineHeight: 1,
+                paddingRight: '3px',
+                paddingBottom: '1px',
+                borderTopRightRadius: '2px',
+                borderBottomRightRadius: '2px',
+                boxShadow: '0 1px 2px rgba(0,0,0,0.3)',
               }}
-            />
-            {/* Vertical line */}
+            >
+              <div className="w-[10px] flex-shrink-0" />
+              <span
+                className={`overflow-hidden transition-all duration-150 ${isSelected ? 'max-w-[100px]' : 'max-w-0 group-hover:max-w-[100px]'}`}
+              >
+                {marker.name || `Marker ${marker.id}`}
+              </span>
+            </div>
+            {/* Vertical line (flagpole) */}
             <div
-              className={`absolute top-0 bottom-0 w-px ${isSelected ? 'bg-red-500' : 'bg-red-400'}`}
-              style={{ left: `${leftPercent}%` }}
+              className="absolute bottom-0 w-px bg-red-400"
+              style={{ left: '6px', top: -13 }}
             />
           </div>
         );
@@ -664,11 +758,13 @@ export function TrimBar({
               position={startPercent}
               colorClass="bg-blue-400"
               onMouseDown={handleLoopZoneStartDrag}
+              edge="start"
             />
             <TimelineHandle
               position={endPercent}
               colorClass="bg-blue-400"
               onMouseDown={handleLoopZoneEndDrag}
+              edge="end"
             />
           </>
         );
@@ -700,11 +796,13 @@ export function TrimBar({
                 position={startPercent}
                 colorClass={nextColor.dot}
                 interactive={false}
+                edge="start"
               />
               <TimelineHandle
                 position={endPercent}
                 colorClass={nextColor.dot}
                 interactive={false}
+                edge="end"
               />
             </>
           );
@@ -732,12 +830,62 @@ export function TrimBar({
         );
       })()}
 
+      {/* Hover time tooltip */}
+      {hoverInfo && (
+        <div
+          className="absolute pointer-events-none z-50 -bottom-6 transform -translate-x-1/2 bg-zinc-800 text-white text-[10px] px-1.5 py-0.5 rounded shadow"
+          style={{ left: hoverInfo.x }}
+        >
+          {formatDuration(hoverInfo.time)}
+        </div>
+      )}
+
       {/* Playhead indicator */}
       {currentTime !== undefined && (
         <div
-          className="absolute top-0 bottom-0 w-px bg-white z-30 pointer-events-none"
-          style={{ left: `${(currentTime / duration) * 100}%` }}
-        />
+          className={`absolute top-0 bottom-0 z-50 ${playheadLocked ? 'cursor-ew-resize' : 'pointer-events-none'}`}
+          style={{
+            left: `${(currentTime / duration) * 100}%`,
+            width: '13px',
+            marginLeft: '-6px',
+          }}
+          onMouseDown={playheadLocked ? (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            isDraggingRef.current = true;
+
+            const handleMouseMove = (ev: MouseEvent) => {
+              const time = getTimeFromPosition(ev.clientX);
+              onSeek(time);
+              onHover?.(time);
+              updateHoverFromClientX(ev.clientX);
+            };
+
+            const handleMouseUp = () => {
+              document.removeEventListener('mousemove', handleMouseMove);
+              document.removeEventListener('mouseup', handleMouseUp);
+              setTimeout(() => { isDraggingRef.current = false; }, 0);
+            };
+
+            document.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseup', handleMouseUp);
+          } : undefined}
+        >
+          {/* Line - fixed at 6px to avoid subpixel blur */}
+          <div
+            className={`absolute top-0 bottom-0 w-px ${playheadLocked ? 'bg-blue-400' : 'bg-white'}`}
+            style={{ left: '6px' }}
+          />
+          {/* Dots - 9px, fixed at 2px to center in 13px container */}
+          <div
+            className={`absolute -top-1.5 w-[9px] h-[9px] rounded-full ${playheadLocked ? 'bg-blue-400' : 'bg-white'}`}
+            style={{ left: '2px' }}
+          />
+          <div
+            className={`absolute -bottom-1.5 w-[9px] h-[9px] rounded-full ${playheadLocked ? 'bg-blue-400' : 'bg-white'}`}
+            style={{ left: '2px' }}
+          />
+        </div>
       )}
     </div>
   );

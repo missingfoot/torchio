@@ -1,4 +1,4 @@
-import { SquareSplitHorizontal, Scissors, Volume2, VolumeX } from "lucide-react";
+import { SquareSplitHorizontal, Scissors, Volume2, VolumeX, Magnet } from "lucide-react";
 import { Button, ButtonGroup } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
@@ -9,6 +9,7 @@ interface PlaybackControlsProps {
   isMuted: boolean;
   volume: number;
   loopZone: { start: number; end: number } | null;
+  snappingEnabled: boolean;
 
   // Callbacks
   onGoToStart: () => void;
@@ -19,6 +20,7 @@ interface PlaybackControlsProps {
   onAddTrim: () => void;
   onToggleMute: () => void;
   onVolumeChange: (volume: number) => void;
+  onToggleSnapping: () => void;
 }
 
 export function PlaybackControls({
@@ -27,6 +29,7 @@ export function PlaybackControls({
   isMuted,
   volume,
   loopZone,
+  snappingEnabled,
   onGoToStart,
   onStepBackward,
   onStepForward,
@@ -35,6 +38,7 @@ export function PlaybackControls({
   onAddTrim,
   onToggleMute,
   onVolumeChange,
+  onToggleSnapping,
 }: PlaybackControlsProps) {
   const handleVolumeWheel = (e: React.WheelEvent) => {
     e.preventDefault();
@@ -173,6 +177,23 @@ export function PlaybackControls({
 
       {/* Divider */}
       <div className="h-5 w-px bg-border ml-2" />
+
+      {/* Snap toggle */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="subtle"
+            size="icon"
+            onClick={onToggleSnapping}
+            className={snappingEnabled ? 'bg-blue-500/20 text-blue-400' : ''}
+          >
+            <Magnet className="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top">
+          <p>Toggle snapping (trims snap to markers and other trim edges)</p>
+        </TooltipContent>
+      </Tooltip>
 
       {/* Volume controls */}
       <div className="flex items-center gap-3 ml-2">
