@@ -113,9 +113,19 @@ Your files are yours. Period.
 
 ## System Requirements
 
-- Windows 10/11 (macOS and Linux planned)
+- Windows 10/11, macOS (Apple Silicon), Linux
 - FFmpeg included — nothing else to install
 - NVIDIA GPU optional (enables faster exports)
+
+### macOS Installation Note
+
+After installing, you may see a "damaged" error. This happens because the app isn't signed with an Apple Developer certificate. To fix it, open Terminal and run:
+
+```bash
+xattr -cr /Applications/Torchio.app
+```
+
+Then open the app normally.
 
 ---
 

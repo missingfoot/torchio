@@ -239,7 +239,11 @@ jobs:
 
           **Windows**: You may see a SmartScreen warning. Click \"More info\" → \"Run anyway\" to install.
 
-          **macOS**: You may see a Gatekeeper warning. Right-click the app → \"Open\" → \"Open\" to bypass.
+          **macOS**: After installing, open Terminal and run:
+          \`\`\`
+          xattr -cr /Applications/Torchio.app
+          \`\`\`
+          Then open the app normally. This is required because the app is not signed with an Apple Developer certificate.
 
           **Linux**: Install with \`sudo dpkg -i Torchio-linux-amd64.deb\`
 
