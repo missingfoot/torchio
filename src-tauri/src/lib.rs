@@ -4,7 +4,7 @@ mod converter;
 mod ffmpeg;
 
 use converter::{convert_file_impl, ConversionResult, Marker};
-use ffmpeg::{get_ffmpeg_path, get_ffprobe_path, get_video_info};
+use ffmpeg::{get_ffmpeg_path, get_ffprobe_path, get_video_info, get_media_metadata, MediaMetadata};
 use std::fs;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
@@ -15,11 +15,35 @@ async fn get_file_size(path: String) -> Result<u64, String> {
         .map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+struct VideoInfoResult {
+    duration: f64,
+    width: u32,
+    height: u32,
+}
+
 #[tauri::command]
 async fn get_video_duration(app: tauri::AppHandle, path: String) -> Result<f64, String> {
     let ffprobe = get_ffprobe_path(&app);
     let info = get_video_info(&ffprobe, &path).await?;
     Ok(info.duration)
+}
+
+#[tauri::command]
+async fn get_video_info_cmd(app: tauri::AppHandle, path: String) -> Result<VideoInfoResult, String> {
+    let ffprobe = get_ffprobe_path(&app);
+    let info = get_video_info(&ffprobe, &path).await?;
+    Ok(VideoInfoResult {
+        duration: info.duration,
+        width: info.width,
+        height: info.height,
+    })
+}
+
+#[tauri::command]
+async fn get_media_metadata_cmd(app: tauri::AppHandle, path: String) -> Result<MediaMetadata, String> {
+    let ffprobe = get_ffprobe_path(&app);
+    get_media_metadata(&ffprobe, &path).await
 }
 
 #[tauri::command]
@@ -153,7 +177,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_file_size, get_video_duration, extract_frame, extract_filmstrip, detect_scenes, convert_file])
+        .invoke_handler(tauri::generate_handler![get_file_size, get_video_duration, get_video_info_cmd, get_media_metadata_cmd, extract_frame, extract_filmstrip, detect_scenes, convert_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
