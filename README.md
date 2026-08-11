@@ -113,7 +113,7 @@ Your files are yours. Period.
 
 ## System Requirements
 
-- Windows 10/11, macOS (Apple Silicon), Linux
+- Windows 10/11, macOS (Apple Silicon)
 - FFmpeg included — nothing else to install
 - NVIDIA GPU optional (enables faster exports)
 

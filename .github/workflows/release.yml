@@ -114,66 +114,8 @@ jobs:
           path: src-tauri/target/release/bundle/dmg/*.dmg
           retention-days: 5
 
-  build-linux:
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf
-
-      - name: Download FFmpeg (Linux static)
-        run: |
-          echo "Downloading static FFmpeg..."
-          curl -L -o /tmp/ffmpeg.tar.xz "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-
-          echo "Extracting FFmpeg..."
-          tar -xf /tmp/ffmpeg.tar.xz -C /tmp
-
-          echo "Copying FFmpeg binaries..."
-          cp /tmp/ffmpeg-*-amd64-static/ffmpeg src-tauri/ffmpeg/ffmpeg
-          cp /tmp/ffmpeg-*-amd64-static/ffprobe src-tauri/ffmpeg/ffprobe
-          chmod +x src-tauri/ffmpeg/ffmpeg src-tauri/ffmpeg/ffprobe
-
-          echo "FFmpeg binaries ready:"
-          ls -la src-tauri/ffmpeg/
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build Tauri app
-        run: npm run tauri build
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-deb
-          path: src-tauri/target/release/bundle/deb/*.deb
-          retention-days: 5
-
   release:
-    needs: [build-windows, build-macos, build-linux]
+    needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -204,7 +146,6 @@ jobs:
           # Rename artifacts to version-less names for stable download URLs
           cp artifacts/windows-installer/*.exe release-assets/Torchio-windows-x64.exe || true
           cp artifacts/macos-dmg/*.dmg release-assets/Torchio-macos-arm64.dmg || true
-          cp artifacts/linux-deb/*.deb release-assets/Torchio-linux-amd64.deb || true
 
           echo "Release assets:"
           ls -la release-assets/
@@ -233,7 +174,6 @@ jobs:
           |----------|----------|
           | Windows | [Torchio-windows-x64.exe](https://github.com/${{ github.repository }}/releases/latest/download/Torchio-windows-x64.exe) |
           | macOS (Apple Silicon) | [Torchio-macos-arm64.dmg](https://github.com/${{ github.repository }}/releases/latest/download/Torchio-macos-arm64.dmg) |
-          | Linux | [Torchio-linux-amd64.deb](https://github.com/${{ github.repository }}/releases/latest/download/Torchio-linux-amd64.deb) |
 
           ### Installation Notes
 
@@ -244,8 +184,6 @@ jobs:
           xattr -cr /Applications/Torchio.app
           \`\`\`
           Then open the app normally. This is required because the app is not signed with an Apple Developer certificate.
-
-          **Linux**: Install with \`sudo dpkg -i Torchio-linux-amd64.deb\`
 
           ---
           v$VERSION • Built from commit ${{ github.sha }}" \
